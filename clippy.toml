@@ -1,0 +1,17 @@
+# treesize 项目 Clippy lint 配置
+# 在 maintain Clippy 默认警告级别基础上自定义
+
+# 允许的 lint 阈值（与 clippy 当前版本字段名一致）
+too-many-lines-threshold = 1200
+
+# 允许略高的复杂度（DDD 领域方法往往需要多个 match arm）
+cognitive-complexity-threshold = 30
+
+# 结构体允许的字段数
+struct-field-name-threshold = 20
+
+# 允许的嵌套模块深度
+too-many-arguments-threshold = 8
+
+# 变量名允许的最小字符数（允许单字母变量用于短作用域）
+min-ident-chars-threshold = 1

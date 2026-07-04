@@ -1,0 +1,89 @@
+[package]
+name = "treesize"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+authors = ["treesize"]
+description = "磁盘占用分析工具：树形目录 + Treemap + 多维报表 + 重复文件扫描，支持 CLI 与 GUI"
+license = "MIT"
+
+[[bin]]
+name = "treesize"
+path = "src/main.rs"
+
+[lib]
+name = "treesize"
+path = "src/lib.rs"
+
+[dependencies]
+# CLI 参数解析
+clap = { version = "4.5", features = ["derive", "cargo"] }
+
+# GUI 框架
+eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui = "0.27"
+egui_extras = { version = "0.27", features = ["syntect"] }
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1.3"
+
+# 日志
+tracing = "0.1"
+tracing-core = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry", "chrono"] }
+tracing-appender = "0.2"
+
+# 并行与文件遍历
+rayon = "1.10"
+jwalk = "0.8"
+
+# 错误处理
+thiserror = "1"
+anyhow = "1"
+
+# 工具
+chrono = { version = "0.4", features = ["serde"] }
+humansize = "2"
+
+# 哈希（重复文件扫描）
+blake3 = "1"
+
+# SQLite（扫描历史持久化）
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# 系统数据目录
+dirs-next = "2"
+
+# 文件对话框
+rfd = "0.14"
+
+# 系统信息（内存监控）
+sysinfo = "0.32"
+
+# Windows API（控制台分配、MFT 直接读取、USN Journal 增量扫描）
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Console",
+    "Win32_Foundation",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(embedded_font)"] }

@@ -1,0 +1,231 @@
+;
+// ── Squarified Treemap Layout ──────────────────────────────────────────────
+function sqrTreemap(children, x, y, w, h) {
+  var total = 0;
+  for (var i = 0; i < children.length; i++) total += children[i].size["0"];
+  if (total === 0) return;
+  var nodes = children.map(function(c) { return { data: c, size: c.size["0"] }; });
+  nodes.sort(function(a, b) { return b.size - a.size; });
+  var row = [];
+  function worst(r, ww) {
+    if (r.length === 0) return Infinity;
+    var s = 0;
+    for (var i = 0; i < r.length; i++) s += r[i].size;
+    var min = r[0].size, max = r[r.length - 1].size;
+    var sw2 = s * s;
+    return Math.max(ww * ww * max / sw2, sw2 / (ww * ww * min));
+  }
+  var cx = x, cy = y, cw = w, ch = h;
+  for (var i = 0; i < nodes.length; i++) {
+    row.push(nodes[i]);
+    var rest = nodes.slice(i + 1);
+    var rSize = 0;
+    for (var j = 0; j < rest.length; j++) rSize += rest[j].size;
+    var rowW = cw >= ch ? cw : ch;
+    var rowH = (total > 0) ? (row.reduce(function(s, n) { return s + n.size; }, 0) * (cw >= ch ? ch : cw) / total) : 0;
+    if (i + 1 < nodes.length && worst(row, rowH) >= worst(row.concat([nodes[i + 1]]), rowH)) continue;
+    // layout this row
+    var rowSize = 0;
+    for (var j = 0; j < row.length; j++) rowSize += row[j].size;
+    if (cw >= ch) {
+      var rh = (total > 0) ? (rowSize / total) * h : 0;
+      var ry = cy;
+      for (var j = 0; j < row.length; j++) {
+        var rw = (rowSize > 0) ? (row[j].size / rowSize) * cw : cw / row.length;
+        row[j].x = cx; row[j].y = ry; row[j].w = rw; row[j].h = rh;
+        ry += rwh(ry, row[j], rh);
+        // Actually, squarified layout needs row height, not per-item height variation
+      }
+    }
+  }
+}
+
+// ── Color palette ──────────────────────────────────────────────────────────
+var CAT_COLORS = {
+  "Document": "#6c8cff", "Image": "#4ade80", "Video": "#fb923c",
+  "Audio": "#f472b6", "Archive": "#a78bfa", "Code": "#2dd4bf",
+  "Executable": "#f87171", "Database": "#818cf8", "Config": "#94a3b8",
+  "Font": "#e879f9", "Other": "#64748b"
+};
+
+function catColor(cat) { return CAT_COLORS[cat] || CAT_COLORS["Other"]; }
+
+function fmtSize(v) {
+  if (v >= 1099511627776) return (v / 1099511627776).toFixed(2) + " TB";
+  if (v >= 1073741824) return (v / 1073741824).toFixed(2) + " GB";
+  if (v >= 1048576) return (v / 1048576).toFixed(1) + " MB";
+  if (v >= 1024) return (v / 1024).toFixed(1) + " KB";
+  return v + " B";
+}
+
+function fmtPct(v) { return v.toFixed(1) + "%"; }
+
+function esc(s) {
+  if (typeof s !== "string") return "";
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+// ── Tree view ──────────────────────────────────────────────────────────────
+function buildTreeHTML(data, depth) {
+  if (depth === undefined) depth = 0;
+  if (!data) return "";
+  var isDir = data.file_type === "Directory";
+  var icon = isDir ? "<span class=\"node-icon folder\">&#128193;</span>" : "<span class=\"node-icon file\">&#128196;</span>";
+  var barW = TS > 0 ? (data.size["0"] / TS) * 100 : 0;
+  var barColor = catColor(data.category);
+  var childrenHTML = "";
+  if (data.children && data.children.length > 0) {
+    for (var i = 0; i < data.children.length; i++) {
+      childrenHTML += buildTreeHTML(data.children[i], depth + 1);
+    }
+  }
+  var hasChildren = data.children && data.children.length > 0;
+  var toggle = hasChildren ? "<span class=\"toggle\">&#9660;</span>" : "<span class=\"toggle\"></span>";
+  var li = "<li>" + toggle + "<span class=\"node-label\">" + icon +
+    "<span>" + esc(data.name || "") + "</span>" +
+    "<span class=\"node-size\">" + fmtSize(data.size["0"]) + "</span>" +
+    "<span class=\"node-pct\">" + fmtPct(barW) + "</span>" +
+    "<span class=\"tree-bar\" style=\"width:" + Math.max(barW * 2, 2) + "px;background:" + barColor + "\"></span>" +
+    "</span>";
+  if (hasChildren) li += "<ul style=\"display:none\">" + childrenHTML + "</ul>";
+  li += "</li>";
+  return li;
+}
+
+(function() {
+  var treeRoot = document.getElementById("tree-root");
+  if (treeRoot && TREE) {
+    var html = "<ul class=\"tree\">" + buildTreeHTML(TREE, 0) + "</ul>";
+    treeRoot.innerHTML = html;
+    // Toggle expand/collapse
+    treeRoot.addEventListener("click", function(e) {
+      var toggle = e.target.closest(".toggle");
+      if (toggle) {
+        var li = toggle.parentElement;
+        var ul = li.querySelector("ul");
+        if (ul) {
+          if (ul.style.display === "none") {
+            ul.style.display = "";
+            toggle.innerHTML = "&#9660;";
+          } else {
+            ul.style.display = "none";
+            toggle.innerHTML = "&#9654;";
+          }
+        }
+      }
+    });
+  }
+})();
+
+// ── Table population ───────────────────────────────────────────────────────
+function populateTable(data, tbodyId) {
+  var tbody = document.getElementById(tbodyId);
+  if (!tbody) return;
+  var html = "";
+  for (var i = 0; i < data.length; i++) {
+    var d = data[i];
+    var barW = TS > 0 ? (d.size["0"] / TS) * 100 : 0;
+    var dot = "<span class=\"cat-dot\" style=\"background:" + catColor(d.category) + "\"></span>";
+    html += "<tr><td class=\"name-cell\" title=\"" + esc(d.path) + "\">" + dot + esc(d.name) + "</td>" +
+      "<td>" + fmtSize(d.size["0"]) + "</td>" +
+      "<td><div class=\"bar-wrap\"><div class=\"bar\" style=\"width:" + Math.min(barW, 100) + "%\"></div></div> " + fmtPct(d.percent) + "</td>" +
+      "<td>" + (d.category || "Other") + "</td>" +
+      "<td>" + esc(d.extension) + "</td>" +
+      "<td>" + esc(d.modified || "") + "</td></tr>";
+  }
+  tbody.innerHTML = html;
+}
+
+if (TOP_FILES) populateTable(TOP_FILES, "top-files-body");
+if (TOP_DIRS) {
+  // Top dirs has different columns
+  var tbody = document.getElementById("top-dirs-body");
+  if (tbody) {
+    var html = "";
+    for (var i = 0; i < TOP_DIRS.length; i++) {
+      var d = TOP_DIRS[i];
+      var barW = TS > 0 ? (d.size["0"] / TS) * 100 : 0;
+      html += "<tr><td class=\"name-cell\" title=\"" + esc(d.path) + "\">" + esc(d.name) + "</td>" +
+        "<td>" + fmtSize(d.size["0"]) + "</td>" +
+        "<td><div class=\"bar-wrap\"><div class=\"bar\" style=\"width:" + Math.min(barW, 100) + "%;background:var(--purple)\"></div></div> " + fmtPct(d.percent) + "</td></tr>";
+    }
+    tbody.innerHTML = html;
+  }
+}
+
+// ── Classify report ────────────────────────────────────────────────────────
+if (CLASSIFY) {
+  document.getElementById("classify-tab").style.display = "";
+  var root = document.getElementById("classify-root");
+  if (root) {
+    var html = "<div class=\"classify-grid\"><div><h3 style=\"margin-bottom:12px;font-size:15px;color:var(--text-secondary)\">按分类</h3><table><thead><tr><th>分类</th><th>文件数</th><th>大小</th><th>占比</th></tr></thead><tbody>";
+    for (var i = 0; i < CLASSIFY.by_category.length; i++) {
+      var c = CLASSIFY.by_category[i];
+      var dot = "<span class=\"cat-dot\" style=\"background:" + catColor(c.category) + "\"></span>";
+      var barW = CLASSIFY.total_size["0"] > 0 ? (c.total_size["0"] / CLASSIFY.total_size["0"]) * 100 : 0;
+      html += "<tr><td style=\"text-align:left\">" + dot + esc(c.label) + "</td><td>" + c.file_count + "</td><td>" + fmtSize(c.total_size["0"]) + "</td><td><div class=\"bar-wrap\"><div class=\"bar\" style=\"width:" + Math.min(barW, 100) + "%;background:" + catColor(c.category) + "\"></div></div> " + fmtPct(c.percent) + "</td></tr>";
+    }
+    html += "</tbody></table></div><div><h3 style=\"margin-bottom:12px;font-size:15px;color:var(--text-secondary)\">按扩展名</h3><table><thead><tr><th>扩展名</th><th>文件数</th><th>大小</th><th>占比</th></tr></thead><tbody>";
+    for (var i = 0; i < CLASSIFY.by_extension.length; i++) {
+      var e = CLASSIFY.by_extension[i];
+      var pct = CLASSIFY.total_size["0"] > 0 ? (e.total_size["0"] / CLASSIFY.total_size["0"]) * 100 : 0;
+      html += "<tr><td style=\"text-align:left\">" + esc(e.extension) + "</td><td>" + e.file_count + "</td><td>" + fmtSize(e.total_size["0"]) + "</td><td>" + fmtPct(e.percent) + "</td></tr>";
+    }
+    html += "</tbody></table></div></div>";
+    root.innerHTML = html;
+  }
+}
+
+// ── Tab switching ──────────────────────────────────────────────────────────
+(function() {
+  var tabs = document.querySelectorAll(".tab");
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].addEventListener("click", function() {
+      var tabName = this.getAttribute("data-tab");
+      if (!tabName) return;
+      // Deactivate all tabs
+      var all = document.querySelectorAll(".tab");
+      for (var j = 0; j < all.length; j++) all[j].classList.remove("active");
+      var contents = document.querySelectorAll(".tab-content");
+      for (var j = 0; j < contents.length; j++) contents[j].classList.remove("active");
+      this.classList.add("active");
+      var target = document.getElementById("tab-" + tabName);
+      if (target) target.classList.add("active");
+    });
+  }
+})();
+
+// ── Table sorting ──────────────────────────────────────────────────────────
+(function() {
+  var tables = document.querySelectorAll("table");
+  for (var t = 0; t < tables.length; t++) {
+    var ths = tables[t].querySelectorAll("th[data-sort]");
+    for (var i = 0; i < ths.length; i++) {
+      ths[i].addEventListener("click", function() {
+        var table = this.closest("table");
+        var tbody = table.querySelector("tbody");
+        if (!tbody) return;
+        var col = Array.prototype.indexOf.call(this.parentElement.children, this);
+        var key = this.getAttribute("data-sort");
+        var dir = this.getAttribute("data-dir") || "asc";
+        var newDir = dir === "asc" ? "desc" : "asc";
+        this.setAttribute("data-dir", newDir);
+        var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr"));
+        rows.sort(function(a, b) {
+          var av = a.children[col] ? a.children[col].textContent.trim() : "";
+          var bv = b.children[col] ? b.children[col].textContent.trim() : "";
+          if (key === "size" || key === "percent") {
+            var an = parseFloat(av) || 0;
+            var bn = parseFloat(bv) || 0;
+            return newDir === "asc" ? an - bn : bn - an;
+          }
+          return newDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+        });
+        for (var j = 0; j < rows.length; j++) tbody.appendChild(rows[j]);
+      });
+    }
+  }
+})();
+</script>
+</body>
+</html>

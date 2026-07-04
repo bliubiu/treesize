@@ -1,0 +1,26 @@
+# treesize 项目统一 Rust 格式化配置
+# 在最大限度接近 rustfmt 默认风格的基础上微调
+
+# 行宽
+max_width = 120
+
+# 单行宽度控制
+fn_single_line = true
+where_single_line = true
+
+# 导入合并
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
+
+# 格式化生成的代码
+format_code_in_doc_comments = true
+format_macro_matchers = true
+format_strings = false
+
+# 匹配分支风格
+match_block_trailing_comma = true
+
+# 条件编译
+wrap_comments = false
+normalize_comments = true
+normalize_doc_attributes = true
