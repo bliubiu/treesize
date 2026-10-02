@@ -22,7 +22,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("初始化日志失败：{e}");
             return ExitCode::FAILURE;
-        }
+        },
     };
 
     tracing::info!("treesize 启动，运行模式：{:?}", mode);
@@ -36,12 +36,12 @@ fn main() -> ExitCode {
         Ok(()) => {
             tracing::info!("treesize 正常退出");
             ExitCode::SUCCESS
-        }
+        },
         Err(e) => {
             tracing::error!("treesize 异常退出：{e}");
             eprintln!("错误：{e}");
             ExitCode::FAILURE
-        }
+        },
     }
 }
 

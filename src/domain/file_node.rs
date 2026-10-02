@@ -170,7 +170,6 @@ impl FileNode {
             None
         }
     }
-
 }
 
 #[cfg(test)]

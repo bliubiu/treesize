@@ -23,68 +23,98 @@ pub struct ThemeColors {
     pub tab_text_inactive: Color32,
     pub bar_track: Color32,
     pub bar_fill: Color32,
+    /// 进度条底色
+    pub progress_track: Color32,
+    /// 进度条填充色
+    pub progress_fill: Color32,
+    /// 分组标签色
+    pub group_label: Color32,
 }
 
 fn dark_theme() -> ThemeColors {
     ThemeColors {
-        bg_primary: Color32::from_rgb(15, 20, 25),
-        bg_surface: Color32::from_rgb(26, 32, 40),
-        bg_card: Color32::from_rgb(34, 42, 52),
-        bg_hover: Color32::from_rgb(44, 54, 66),
-        accent: Color32::from_rgb(79, 195, 247),
-        accent_hover: Color32::from_rgb(129, 212, 250),
-        accent_dim: Color32::from_rgb(41, 182, 246),
-        text_primary: Color32::from_rgb(232, 238, 242),
-        text_secondary: Color32::from_rgb(150, 162, 175),
-        text_dim: Color32::from_rgb(96, 108, 120),
-        border: Color32::from_rgb(42, 52, 64),
-        border_light: Color32::from_rgb(58, 70, 84),
-        success: Color32::from_rgb(102, 187, 106),
-        danger: Color32::from_rgb(239, 83, 80),
-        warn: Color32::from_rgb(255, 183, 77),
-        tab_active_bg: Color32::from_rgb(34, 42, 52),
-        tab_inactive_bg: Color32::from_rgb(26, 32, 40),
-        tab_text_active: Color32::from_rgb(79, 195, 247),
-        tab_text_inactive: Color32::from_rgb(150, 162, 175),
-        bar_track: Color32::from_rgb(42, 52, 64),
-        bar_fill: Color32::from_rgb(79, 195, 247),
+        // ── 背景层级（自深至浅）──
+        bg_primary: Color32::from_rgb(10, 14, 20), // #0A0E14
+        bg_surface: Color32::from_rgb(20, 26, 35), // #141A23
+        bg_card: Color32::from_rgb(28, 36, 51),    // #1C2433
+        bg_hover: Color32::from_rgb(38, 48, 67),   // #263043
+
+        // ── 强调色：青蓝（数据流/冷存储）──
+        accent: Color32::from_rgb(0, 188, 212),        // #00BCD4
+        accent_hover: Color32::from_rgb(77, 208, 225), // #4DD0E1
+        accent_dim: Color32::from_rgb(0, 151, 167),    // #0097A7
+
+        // ── 文字层级 ──
+        text_primary: Color32::from_rgb(236, 239, 241),   // #ECEFF1
+        text_secondary: Color32::from_rgb(144, 164, 174), // #90A4AE
+        text_dim: Color32::from_rgb(84, 110, 122),        // #546E7A
+
+        // ── 边框 ──
+        border: Color32::from_rgb(38, 50, 56),       // #263238
+        border_light: Color32::from_rgb(55, 71, 79), // #37474F
+
+        // ── 语义色 ──
+        success: Color32::from_rgb(102, 187, 106), // #66BB6A
+        danger: Color32::from_rgb(239, 83, 80),    // #EF5350
+        warn: Color32::from_rgb(255, 183, 77),     // #FFB74D
+
+        // ── Tab ──
+        tab_active_bg: Color32::from_rgb(28, 36, 51),
+        tab_inactive_bg: Color32::from_rgb(20, 26, 35),
+        tab_text_active: Color32::from_rgb(0, 188, 212),
+        tab_text_inactive: Color32::from_rgb(144, 164, 174),
+
+        // ── 进度条/柱状条 ──
+        bar_track: Color32::from_rgb(38, 50, 56),
+        bar_fill: Color32::from_rgb(0, 188, 212),
+        progress_track: Color32::from_rgb(28, 36, 51),
+        progress_fill: Color32::from_rgb(0, 188, 212),
+
+        // ── 杂项 ──
+        group_label: Color32::from_rgb(84, 110, 122),
     }
 }
 
 fn light_theme() -> ThemeColors {
     ThemeColors {
-        bg_primary: Color32::from_rgb(245, 247, 250),
-        bg_surface: Color32::from_rgb(255, 255, 255),
-        bg_card: Color32::from_rgb(237, 241, 245),
-        bg_hover: Color32::from_rgb(225, 230, 237),
-        accent: Color32::from_rgb(2, 119, 189),
-        accent_hover: Color32::from_rgb(3, 155, 229),
-        accent_dim: Color32::from_rgb(79, 195, 247),
-        text_primary: Color32::from_rgb(26, 35, 50),
-        text_secondary: Color32::from_rgb(96, 110, 130),
-        text_dim: Color32::from_rgb(150, 162, 175),
-        border: Color32::from_rgb(220, 226, 234),
-        border_light: Color32::from_rgb(235, 240, 245),
-        success: Color32::from_rgb(67, 160, 71),
-        danger: Color32::from_rgb(229, 57, 53),
-        warn: Color32::from_rgb(245, 124, 0),
-        tab_active_bg: Color32::from_rgb(237, 241, 245),
+        bg_primary: Color32::from_rgb(245, 247, 250), // #F5F7FA
+        bg_surface: Color32::from_rgb(255, 255, 255), // #FFFFFF
+        bg_card: Color32::from_rgb(236, 239, 241),    // #ECEFF1
+        bg_hover: Color32::from_rgb(224, 228, 232),   // #E0E4E8
+
+        accent: Color32::from_rgb(0, 131, 143),       // #00838F
+        accent_hover: Color32::from_rgb(0, 172, 193), // #00ACC1
+        accent_dim: Color32::from_rgb(77, 208, 225),  // #4DD0E1
+
+        text_primary: Color32::from_rgb(38, 50, 56),     // #263238
+        text_secondary: Color32::from_rgb(96, 125, 139), // #607D8B
+        text_dim: Color32::from_rgb(144, 164, 174),      // #90A4AE
+
+        border: Color32::from_rgb(207, 216, 220),       // #CFD8DC
+        border_light: Color32::from_rgb(221, 230, 235), // #DDE6EB
+
+        success: Color32::from_rgb(67, 160, 71), // #43A047
+        danger: Color32::from_rgb(229, 57, 53),  // #E53935
+        warn: Color32::from_rgb(245, 124, 0),    // #F57C00
+
+        tab_active_bg: Color32::from_rgb(236, 239, 241),
         tab_inactive_bg: Color32::from_rgb(255, 255, 255),
-        tab_text_active: Color32::from_rgb(2, 119, 189),
-        tab_text_inactive: Color32::from_rgb(96, 110, 130),
-        bar_track: Color32::from_rgb(220, 226, 234),
-        bar_fill: Color32::from_rgb(2, 119, 189),
+        tab_text_active: Color32::from_rgb(0, 131, 143),
+        tab_text_inactive: Color32::from_rgb(96, 125, 139),
+
+        bar_track: Color32::from_rgb(207, 216, 220),
+        bar_fill: Color32::from_rgb(0, 131, 143),
+        progress_track: Color32::from_rgb(236, 239, 241),
+        progress_fill: Color32::from_rgb(0, 131, 143),
+
+        group_label: Color32::from_rgb(144, 164, 174),
     }
 }
 
 pub fn apply_theme(ctx: &Context, dark: bool) -> ThemeColors {
     let colors = if dark { dark_theme() } else { light_theme() };
 
-    let mut visuals = if dark {
-        Visuals::dark()
-    } else {
-        Visuals::light()
-    };
+    let mut visuals = if dark { Visuals::dark() } else { Visuals::light() };
 
     visuals.panel_fill = colors.bg_primary;
     visuals.window_fill = colors.bg_surface;

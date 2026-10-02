@@ -101,11 +101,7 @@ impl DuplicateService {
             .collect();
 
         let stage1_count = files.len();
-        tracing::debug!(
-            "Stage 1 [收集]: 收集 {} 个文件（min_size={})",
-            stage1_count,
-            min_size,
-        );
+        tracing::debug!("Stage 1 [收集]: 收集 {} 个文件（min_size={})", stage1_count, min_size,);
 
         if files.is_empty() {
             return DuplicateReport::default();
@@ -120,10 +116,8 @@ impl DuplicateService {
         }
 
         // 过滤出有 ≥2 个文件的桶（只有这些可能重复）
-        let size_buckets: Vec<(u64, Vec<PathBuf>)> = by_size
-            .into_iter()
-            .filter(|(_, paths)| paths.len() >= 2)
-            .collect();
+        let size_buckets: Vec<(u64, Vec<PathBuf>)> =
+            by_size.into_iter().filter(|(_, paths)| paths.len() >= 2).collect();
 
         let stage2_candidates: usize = size_buckets.iter().map(|(_, p)| p.len()).sum();
         let stage2_buckets = size_buckets.len();
@@ -146,39 +140,37 @@ impl DuplicateService {
         let quick_hash_results: Vec<((u64, String), PathBuf, bool)> = size_buckets
             .into_par_iter()
             .flat_map(|(size, paths)| {
-                paths
-                    .into_par_iter()
-                    .filter_map(move |path| {
-                        if size < head_size {
-                            // 小文件：直接全量哈希，标记已完成
-                            match compute_hash(&path) {
-                                Ok(hash) => Some(((size, hash), path, true)),
-                                Err(e) => {
-                                    tracing::debug!(
-                                        target: "treesize::duplicate",
-                                        "无法计算文件哈希：{} - {}",
-                                        path.display(),
-                                        e
-                                    );
-                                    None
-                                }
-                            }
-                        } else {
-                            // 大文件：只读头部
-                            match compute_head_hash(&path, head_size) {
-                                Ok(hash) => Some(((size, hash), path, false)),
-                                Err(e) => {
-                                    tracing::debug!(
-                                        target: "treesize::duplicate",
-                                        "无法计算文件头部哈希：{} - {}",
-                                        path.display(),
-                                        e
-                                    );
-                                    None
-                                }
-                            }
+                paths.into_par_iter().filter_map(move |path| {
+                    if size < head_size {
+                        // 小文件：直接全量哈希，标记已完成
+                        match compute_hash(&path) {
+                            Ok(hash) => Some(((size, hash), path, true)),
+                            Err(e) => {
+                                tracing::debug!(
+                                    target: "treesize::duplicate",
+                                    "无法计算文件哈希：{} - {}",
+                                    path.display(),
+                                    e
+                                );
+                                None
+                            },
                         }
-                    })
+                    } else {
+                        // 大文件：只读头部
+                        match compute_head_hash(&path, head_size) {
+                            Ok(hash) => Some(((size, hash), path, false)),
+                            Err(e) => {
+                                tracing::debug!(
+                                    target: "treesize::duplicate",
+                                    "无法计算文件头部哈希：{} - {}",
+                                    path.display(),
+                                    e
+                                );
+                                None
+                            },
+                        }
+                    }
+                })
             })
             .collect();
 
@@ -244,9 +236,7 @@ impl DuplicateService {
         // ═════════════════════════════════════════════════════════════════
         let full_hash_results: Vec<((u64, String), PathBuf)> = need_full
             .into_par_iter()
-            .filter_map(|(path, size)| {
-                compute_hash(&path).ok().map(|hash| ((size, hash), path))
-            })
+            .filter_map(|(path, size)| compute_hash(&path).ok().map(|hash| ((size, hash), path)))
             .collect();
 
         let stage5_count = full_hash_results.len();

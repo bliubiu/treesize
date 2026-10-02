@@ -48,9 +48,10 @@ impl MemoryMonitor {
         self.system.refresh_memory();
         self.system
             .refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.pid]), false);
-        
+
         // 获取当前进程内存使用量（字节），转换为 MB
-        let used_mb = self.system
+        let used_mb = self
+            .system
             .process(self.pid)
             .map(|p| p.memory() / 1024 / 1024)
             .unwrap_or(0);
@@ -70,20 +71,20 @@ impl MemoryMonitor {
     pub fn estimate_memory(files_count: u64) -> (u64, bool) {
         // 每个文件节点约 200 字节（保守估算），使用浮点运算避免整数除法归零
         let estimated_mb = ((files_count as f64 * 200.0) / 1024.0 / 1024.0).ceil() as u64;
-        
+
         // 系统可用内存（使用新实例，因是静态方法）
         let mut sys = System::new();
         sys.refresh_memory();
         let available_mb = sys.available_memory() / 1024 / 1024;
-        
+
         // 安全阈值：使用不超过可用内存的 80%
         let safe_limit = (available_mb as f64 * 0.8) as u64;
         let warning = estimated_mb > safe_limit;
-        
+
         if warning {
             tracing::warn!(target: "treesize::memory", "预计内存使用可能超出安全范围：预计 {} MB，安全上限 {} MB", estimated_mb, safe_limit);
         }
-        
+
         (estimated_mb, warning)
     }
 }

@@ -109,18 +109,18 @@ impl WasteType {
     /// 浪费类型对应的颜色（RGB）
     pub fn color(&self) -> [u8; 3] {
         match self {
-            Self::EmptyDirectory => [189, 195, 199],     // 灰色
-            Self::ZeroByteFile => [149, 165, 166],       // 浅灰
-            Self::TemporaryFile => [241, 196, 15],       // 黄色
-            Self::StaleFile => [230, 126, 34],           // 橙色
-            Self::LogFile => [231, 76, 60],              // 红色
-            Self::CacheFile => [155, 89, 182],           // 紫色
-            Self::DuplicateFile => [52, 152, 219],       // 蓝色
-            Self::OrphanFile => [26, 188, 156],          // 青色
-            Self::DeepPathFile => [243, 156, 18],        // 深橙
-            Self::LockFile => [236, 112, 99],            // 珊瑚红
-            Self::RedundantArchive => [142, 68, 173],    // 深紫
-            Self::SystemResidue => [127, 140, 141],      // 深灰
+            Self::EmptyDirectory => [189, 195, 199],  // 灰色
+            Self::ZeroByteFile => [149, 165, 166],    // 浅灰
+            Self::TemporaryFile => [241, 196, 15],    // 黄色
+            Self::StaleFile => [230, 126, 34],        // 橙色
+            Self::LogFile => [231, 76, 60],           // 红色
+            Self::CacheFile => [155, 89, 182],        // 紫色
+            Self::DuplicateFile => [52, 152, 219],    // 蓝色
+            Self::OrphanFile => [26, 188, 156],       // 青色
+            Self::DeepPathFile => [243, 156, 18],     // 深橙
+            Self::LockFile => [236, 112, 99],         // 珊瑚红
+            Self::RedundantArchive => [142, 68, 173], // 深紫
+            Self::SystemResidue => [127, 140, 141],   // 深灰
         }
     }
 }

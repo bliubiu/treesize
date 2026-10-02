@@ -86,11 +86,7 @@ fn squarify(painter: &mut egui::Painter, rect: Rect, node: &FileNode, depth: usi
         return;
     }
 
-    let children: Vec<&FileNode> = node
-        .children
-        .iter()
-        .filter(|c| c.size.0 > 0)
-        .collect();
+    let children: Vec<&FileNode> = node.children.iter().filter(|c| c.size.0 > 0).collect();
 
     if children.is_empty() {
         draw_cell(painter, rect, node, depth);
@@ -285,8 +281,9 @@ fn darken([r, g, b]: [u8; 3], depth: usize) -> [u8; 3] {
 
 /// 绘制图例
 fn draw_legend(painter: &mut egui::Painter, rect: Rect, theme: &ThemeColors) {
-    // 半透明背景，避免完全遮挡数据
-    painter.rect_filled(rect, 4.0, Color32::from_rgba_premultiplied(15, 20, 25, 220));
+    // 使用主题背景色（带透明度），避免完全遮挡数据
+    let bg = theme.bg_primary;
+    painter.rect_filled(rect, 4.0, Color32::from_rgba_premultiplied(bg.r(), bg.g(), bg.b(), 200));
     painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, theme.border_light));
 
     let categories = [
@@ -336,12 +333,7 @@ fn find_node_at<'a>(root: &'a FileNode, rect: Rect, pos: Pos2) -> Option<&'a Fil
     find_node_inner(root, rect, pos, 0)
 }
 
-fn find_node_inner<'a>(
-    node: &'a FileNode,
-    rect: Rect,
-    pos: Pos2,
-    depth: usize,
-) -> Option<&'a FileNode> {
+fn find_node_inner<'a>(node: &'a FileNode, rect: Rect, pos: Pos2, depth: usize) -> Option<&'a FileNode> {
     if !rect.contains(pos) {
         return None;
     }
@@ -458,13 +450,7 @@ fn count_nodes(node: &FileNode) -> usize {
 }
 
 /// 带节点数限制的 Squarified Treemap 算法
-fn squarify_with_limit(
-    painter: &mut egui::Painter,
-    rect: Rect,
-    node: &FileNode,
-    depth: usize,
-    count: &mut usize,
-) {
+fn squarify_with_limit(painter: &mut egui::Painter, rect: Rect, node: &FileNode, depth: usize, count: &mut usize) {
     if node.size.0 == 0 || rect.width() < 2.0 || rect.height() < 2.0 || *count >= MAX_NODES {
         return;
     }
@@ -475,11 +461,7 @@ fn squarify_with_limit(
         return;
     }
 
-    let children: Vec<&FileNode> = node
-        .children
-        .iter()
-        .filter(|c| c.size.0 > 0)
-        .collect();
+    let children: Vec<&FileNode> = node.children.iter().filter(|c| c.size.0 > 0).collect();
 
     if children.is_empty() {
         *count += 1;

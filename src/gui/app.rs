@@ -1,32 +1,32 @@
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
-use std::path::Path;
 
 use eframe::egui;
 use egui::{Color32, Vec2};
 
+use crate::application::models::{SnapshotDiff, TrendReport};
 use crate::application::{
-    ClassifyReport, ClassifyService, DuplicateReport, DuplicateService, ReportService, ScanService,
-    SnapshotDiffService, TopNEntry, TrendService, WasteReport, WasteService,
+    ClassifyReport, ClassifyService, DuplicateReport, DuplicateService, ReportService, ScanService, TopNEntry,
+    TrendService, WasteReport, WasteService,
 };
 use crate::domain::scan_engine::{CancelToken, ScanOptions, ScanProgress, ScanStats};
-use crate::application::models::{SnapshotDiff, TrendReport};
 use crate::domain::value_objects::ByteSize;
 use crate::domain::DragCollector;
-use crate::infrastructure::HistoryStorage;
+use crate::infrastructure::{detect_best_engine, HistoryStorage};
 
-#[cfg(target_os = "windows")]
-use crate::infrastructure::{FsScanEngine, MftScanEngine, UsnScanEngine};
 #[cfg(not(target_os = "windows"))]
 use crate::infrastructure::FsScanEngine;
+#[cfg(target_os = "windows")]
+use crate::infrastructure::{FsScanEngine, MftScanEngine, UsnScanEngine};
 
-use super::render;
-use super::widgets::*;
-use super::sunburst::SunburstView;
-use super::treemap::TreemapView;
-use super::theme::{apply_theme, ThemeColors};
 use super::fonts::setup_chinese_fonts;
+use super::render;
+use super::sunburst::SunburstView;
+use super::theme::{apply_theme, ThemeColors};
+use super::treemap::TreemapView;
+use super::widgets::*;
 
 pub struct GuiOptions {
     pub initial_path: PathBuf,
@@ -83,6 +83,7 @@ pub struct TreeSizeApp {
     search_match_full: bool,
     font_scale: f32,
     dark_mode: bool,
+    theme_follow_system: bool,
     show_settings: bool,
     theme_dirty: bool,
     theme: ThemeColors,
@@ -207,13 +208,28 @@ impl Tab {
             Tab::Collect => "收集",
         }
     }
+
+    /// 导航分组索引（用于视觉分区）
+    fn group(self) -> usize {
+        match self {
+            Tab::Dashboard | Tab::Tree | Tab::Treemap | Tab::Sunburst => 0,
+            Tab::TopFiles | Tab::Classify | Tab::Trend => 1,
+            Tab::Duplicates | Tab::Waste | Tab::Collect => 2,
+        }
+    }
 }
+
+/// 各导航分组的标签文本
+const TAB_GROUP_LABELS: [&str; 3] = ["核心视图", "数据分析", "维护管理"];
 
 impl TreeSizeApp {
     pub fn new(cc: &eframe::CreationContext<'_>, options: GuiOptions) -> Self {
         setup_chinese_fonts(&cc.egui_ctx);
 
-        let dark_mode = false;
+        // 尝试检测系统主题（仅 Windows 注册表读取）
+        let system_dark = detect_system_dark_mode();
+        let dark_mode = system_dark; // 默认跟随系统
+        let theme_follow_system = true;
         let theme = apply_theme(&cc.egui_ctx, dark_mode);
 
         let path_input = options.initial_path.display().to_string();
@@ -229,6 +245,7 @@ impl TreeSizeApp {
             search_match_full: false,
             font_scale: 1.0,
             dark_mode,
+            theme_follow_system,
             show_settings: false,
             theme_dirty: false,
             theme,
@@ -315,7 +332,7 @@ impl TreeSizeApp {
             let result = loop {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     tracing::info!(target: "treesize::gui", "创建扫描引擎...");
-                    let engine = create_scan_engine(&current_options);
+                    let engine = create_scan_engine(&current_options, &path_clone);
                     tracing::info!(target: "treesize::gui", "创建扫描服务...");
                     let service = ScanService::new(engine);
 
@@ -336,16 +353,17 @@ impl TreeSizeApp {
                 match &result {
                     Ok(Err(e)) => {
                         let err_str = e.to_string();
-                        if !fallback_to_fs && current_options.engine == crate::domain::scan_engine::ScanEngineType::Mft 
-                            && (err_str.contains("MFT") || err_str.contains("NTFS") || err_str.contains("LCN")) 
+                        if !fallback_to_fs
+                            && current_options.engine == crate::domain::scan_engine::ScanEngineType::Mft
+                            && (err_str.contains("MFT") || err_str.contains("NTFS") || err_str.contains("LCN"))
                         {
                             tracing::warn!(target: "treesize::gui", "MFT 扫描失败，自动降级到 Fs 引擎重试");
                             fallback_to_fs = true;
                             current_options.engine = crate::domain::scan_engine::ScanEngineType::Fs;
                             continue;
                         }
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
 
                 break result;
@@ -357,11 +375,11 @@ impl TreeSizeApp {
                 Ok(Ok((node, stats))) => {
                     tracing::info!(target: "treesize::gui", "GUI 扫描完成");
                     (Some(node), Some(stats), None)
-                }
+                },
                 Ok(Err(e)) => {
                     tracing::error!(target: "treesize::gui", "GUI 扫描失败：{e}");
                     (None, None, Some(e.to_string()))
-                }
+                },
                 Err(panic_payload) => {
                     let msg = panic_payload
                         .downcast_ref::<&str>()
@@ -370,7 +388,7 @@ impl TreeSizeApp {
                         .unwrap_or_else(|| "扫描线程内部错误".to_string());
                     tracing::error!(target: "treesize::gui", "扫描线程 panic：{msg}");
                     (None, None, Some(msg))
-                }
+                },
             };
 
             if let Ok(mut s) = state.lock() {
@@ -407,14 +425,8 @@ impl TreeSizeApp {
                     .map(|r| r.by_category.len() as u64)
                     .unwrap_or(0),
             ),
-            Tab::Duplicates => self
-                .cached_duplicates
-                .as_ref()
-                .map(|r| r.groups.len() as u64),
-            Tab::Waste => self
-                .cached_waste
-                .as_ref()
-                .map(|r| r.items.len() as u64),
+            Tab::Duplicates => self.cached_duplicates.as_ref().map(|r| r.groups.len() as u64),
+            Tab::Waste => self.cached_waste.as_ref().map(|r| r.items.len() as u64),
             Tab::Collect => Some(self.drag_collector.items.len() as u64),
         }
     }
@@ -437,7 +449,6 @@ impl eframe::App for TreeSizeApp {
         self.render_toolbar(ctx);
         self.render_settings_window(ctx);
         self.render_delete_dialog(ctx);
-        self.render_search_toolbar(ctx);
         self.render_status_bar(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -466,13 +477,19 @@ impl eframe::App for TreeSizeApp {
 
 impl TreeSizeApp {
     fn apply_font_scale(&mut self, ctx: &egui::Context) {
-        let base_size = 18.0;
+        let s = self.font_scale;
         ctx.style_mut(|style| {
-            for (_, font_id) in &mut style.text_styles {
-                font_id.size = base_size * self.font_scale;
-            }
-            style.spacing.item_spacing = Vec2::new(6.0, 4.0);
-            style.spacing.button_padding = Vec2::new(8.0, 3.0);
+            use egui::TextStyle::*;
+            style.text_styles = [
+                (Heading, egui::FontId::proportional(20.0 * s)),
+                (Body, egui::FontId::proportional(16.0 * s)),
+                (Monospace, egui::FontId::monospace(14.0 * s)),
+                (Button, egui::FontId::proportional(16.0 * s)),
+                (Small, egui::FontId::proportional(13.0 * s)),
+            ]
+            .into();
+            style.spacing.item_spacing = Vec2::new(8.0, 6.0);
+            style.spacing.button_padding = Vec2::new(10.0, 4.0);
         });
     }
 
@@ -513,7 +530,11 @@ impl TreeSizeApp {
     fn save_history_async(&mut self) {
         let (needs_save, path_str, node_arc) = {
             let s = self.state.lock().unwrap();
-            (s.node.is_some() && s.stats.is_some(), self.path_input.clone(), s.node.clone())
+            (
+                s.node.is_some() && s.stats.is_some(),
+                self.path_input.clone(),
+                s.node.clone(),
+            )
         };
         if needs_save {
             let elapsed_ms = {
@@ -545,10 +566,7 @@ impl TreeSizeApp {
                 .inner_margin(egui::Margin::symmetric(6.0, 4.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("扫描路径：")
-                                .color(self.theme.text_secondary),
-                        );
+                        ui.label(egui::RichText::new("扫描路径：").color(self.theme.text_secondary));
 
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut self.path_input)
@@ -560,7 +578,7 @@ impl TreeSizeApp {
                         }
 
                         if !self.path_history.is_empty() {
-                            ui.menu_button("📜 历史", |ui| {
+                            ui.menu_button("历史", |ui| {
                                 for p in self.path_history.iter().rev() {
                                     if ui.button(p).clicked() {
                                         self.path_input = p.clone();
@@ -570,30 +588,28 @@ impl TreeSizeApp {
                             });
                         }
 
-                        if ui.button("📁 选择").clicked() {
+                        if ui.button("选择").clicked() {
                             if let Some(path) = rfd::FileDialog::new().pick_folder() {
                                 self.path_input = path.display().to_string();
                             }
                         }
 
-                        let scan_label = if running { "⏳ 扫描中" } else { "▶ 扫描" };
-                        let scan_btn = egui::Button::new(
-                            egui::RichText::new(scan_label)
-                                .color(Color32::WHITE)
-                                .strong(),
-                        )
-                        .fill(if running { self.theme.text_dim } else { self.theme.accent })
-                        .min_size(Vec2::new(60.0, 24.0));
+                        let scan_label = if running { "扫描中" } else { "▶ 扫描" };
+                        let scan_btn =
+                            egui::Button::new(egui::RichText::new(scan_label).color(Color32::WHITE).strong())
+                                .fill(if running {
+                                    self.theme.text_dim
+                                } else {
+                                    self.theme.accent
+                                })
+                                .min_size(Vec2::new(60.0, 24.0));
                         if ui.add_enabled(!running, scan_btn).clicked() {
                             self.start_scan();
                         }
 
                         if running {
-                            let cancel_btn = egui::Button::new(
-                                egui::RichText::new("■ 取消")
-                                    .color(self.theme.danger),
-                            )
-                            .fill(self.theme.bg_card);
+                            let cancel_btn = egui::Button::new(egui::RichText::new("取消").color(self.theme.danger))
+                                .fill(self.theme.bg_card);
                             if ui.add(cancel_btn).clicked() {
                                 self.cancel_scan();
                             }
@@ -602,15 +618,28 @@ impl TreeSizeApp {
                         ui.separator();
                         ui.checkbox(&mut self.show_hidden, "显示隐藏");
                         ui.separator();
-                        ui.label(
-                            egui::RichText::new("TopN:")
-                                .color(self.theme.text_secondary),
-                        );
+                        ui.label(egui::RichText::new("TopN:").color(self.theme.text_secondary));
                         ui.add(egui::DragValue::new(&mut self.top_n).clamp_range(1..=500));
                         ui.separator();
 
-                        if ui.button("⚙ 设置").clicked() {
+                        if ui.button("设置").clicked() {
                             self.show_settings = !self.show_settings;
+                        }
+                        // ── 右侧：Tree 标签下的搜索 inline ──
+                        if self.selected_tab == Tab::Tree {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("清除").clicked() {
+                                    self.search_text.clear();
+                                }
+                                ui.checkbox(&mut self.search_match_full, "完全匹配");
+                                ui.checkbox(&mut self.search_case_sensitive, "区分大小写");
+                                ui.label(egui::RichText::new("查找：").color(self.theme.text_secondary));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.search_text)
+                                        .desired_width(120.0)
+                                        .hint_text("查找文件…"),
+                                );
+                            });
                         }
                     });
                 });
@@ -624,10 +653,7 @@ impl TreeSizeApp {
             .default_size([320.0, 220.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("字体缩放")
-                            .color(self.theme.text_primary),
-                    );
+                    ui.label(egui::RichText::new("字体缩放").color(self.theme.text_primary));
                     if ui.small_button("重置").clicked() {
                         self.font_scale = 1.0;
                     }
@@ -638,52 +664,63 @@ impl TreeSizeApp {
                         .step_by(0.05),
                 );
                 ui.separator();
+                let theme_options = [("浅色", false, false), ("深色", true, false), ("跟随系统", true, true)];
+                // 确定当前选中的索引
+                let selected_idx = if self.theme_follow_system {
+                    2
+                } else if self.dark_mode {
+                    1
+                } else {
+                    0
+                };
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("主题：")
-                            .color(self.theme.text_primary),
-                    );
-                    let prev = self.dark_mode;
-                    let dark_btn = egui::Button::new(
-                        egui::RichText::new("深色")
-                            .color(if self.dark_mode { self.theme.tab_text_active } else { self.theme.text_secondary }),
-                    )
-                    .fill(if self.dark_mode { self.theme.tab_active_bg } else { self.theme.tab_inactive_bg })
-                    .rounding(egui::Rounding::same(4.0));
-                    if ui.add(dark_btn).clicked() {
-                        self.dark_mode = true;
-                    }
-                    let light_btn = egui::Button::new(
-                        egui::RichText::new("亮色")
-                            .color(if !self.dark_mode { self.theme.tab_text_active } else { self.theme.text_secondary }),
-                    )
-                    .fill(if !self.dark_mode { self.theme.tab_active_bg } else { self.theme.tab_inactive_bg })
-                    .rounding(egui::Rounding::same(4.0));
-                    if ui.add(light_btn).clicked() {
-                        self.dark_mode = false;
-                    }
-                    if self.dark_mode != prev {
-                        self.theme_dirty = true;
+                    ui.label(egui::RichText::new("主题：").color(self.theme.text_primary));
+                    for (i, (label, is_dark, follow)) in theme_options.iter().enumerate() {
+                        let is_sel = i == selected_idx;
+                        let btn = egui::Button::new(egui::RichText::new(*label).color(if is_sel {
+                            self.theme.tab_text_active
+                        } else {
+                            self.theme.text_secondary
+                        }))
+                        .fill(if is_sel {
+                            self.theme.tab_active_bg
+                        } else {
+                            self.theme.tab_inactive_bg
+                        })
+                        .rounding(egui::Rounding::same(4.0));
+                        if ui.add(btn).clicked() {
+                            self.theme_follow_system = *follow;
+                            if !follow {
+                                self.dark_mode = *is_dark;
+                            } else {
+                                #[cfg(target_os = "windows")]
+                                {
+                                    self.dark_mode = detect_system_dark_mode();
+                                }
+                                #[cfg(not(target_os = "windows"))]
+                                {
+                                    self.dark_mode = true;
+                                }
+                            }
+                            self.theme_dirty = true;
+                        }
                     }
                 });
                 ui.separator();
                 #[cfg(embedded_font)]
-                ui.label(
-                    egui::RichText::new("字体：Noto Sans SC (内嵌)")
-                        .color(self.theme.text_secondary),
-                );
+                ui.label(egui::RichText::new("字体：Noto Sans SC (内嵌)").color(self.theme.text_secondary));
                 #[cfg(not(embedded_font))]
-                ui.label(
-                    egui::RichText::new("字体：系统字体")
-                        .color(self.theme.text_secondary),
-                );
+                ui.label(egui::RichText::new("字体：系统字体").color(self.theme.text_secondary));
                 ui.separator();
-                ui.label(
-                    egui::RichText::new("扫描引擎：")
-                        .color(self.theme.text_primary),
-                );
+                ui.label(egui::RichText::new("扫描引擎：").color(self.theme.text_primary));
                 let engine = &mut self.options.engine;
                 ui.horizontal(|ui| {
+                    if ui
+                        .radio_value(engine, crate::domain::ScanEngineType::Auto, "自动")
+                        .clicked()
+                    {
+                        tracing::info!("扫描引擎切换为：自动");
+                    }
                     if ui
                         .radio_value(engine, crate::domain::ScanEngineType::Fs, "文件系统")
                         .clicked()
@@ -741,10 +778,8 @@ impl TreeSizeApp {
                                 }
                                 if ui
                                     .add(
-                                        egui::Button::new(
-                                            egui::RichText::new("删除").color(Color32::WHITE),
-                                        )
-                                        .fill(self.theme.danger),
+                                        egui::Button::new(egui::RichText::new("删除").color(Color32::WHITE))
+                                            .fill(self.theme.danger),
                                     )
                                     .clicked()
                                 {
@@ -769,11 +804,11 @@ impl TreeSizeApp {
                                             self.cached_classify = None;
                                             self.cached_duplicates = None;
                                             self.cached_all_files = None;
-                                        }
+                                        },
                                         Err(e) => {
                                             tracing::error!(target: "treesize::gui", "删除失败：{}", e);
                                             self.delete_error = Some(e);
-                                        }
+                                        },
                                     }
                                 }
                             });
@@ -788,30 +823,6 @@ impl TreeSizeApp {
         }
     }
 
-    fn render_search_toolbar(&mut self, ctx: &egui::Context) {
-        if self.selected_tab == Tab::Tree {
-            egui::TopBottomPanel::top("search_toolbar").show(ctx, |ui| {
-                egui::Frame::none()
-                    .fill(self.theme.bg_surface)
-                    .inner_margin(egui::Margin::symmetric(6.0, 3.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("🔍 查找：")
-                                    .color(self.theme.text_secondary),
-                            );
-                            ui.text_edit_singleline(&mut self.search_text);
-                            ui.checkbox(&mut self.search_case_sensitive, "区分大小写");
-                            ui.checkbox(&mut self.search_match_full, "完全匹配");
-                            if ui.button("清除").clicked() {
-                                self.search_text.clear();
-                            }
-                        });
-                    });
-            });
-        }
-    }
-
     fn render_status_bar(&self, ctx: &egui::Context) {
         let snapshot = self.get_snapshot();
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -819,6 +830,24 @@ impl TreeSizeApp {
                 .fill(self.theme.bg_surface)
                 .inner_margin(egui::Margin::symmetric(8.0, 4.0))
                 .show(ui, |ui| {
+                    // 扫描中显示进度条（使用 bytes_scanned / (1MB) 估算进度保持动画）
+                    if snapshot.running {
+                        let bar_height = 3.0;
+                        let avail = ui.available_width();
+                        let (bar_rect, _) =
+                            ui.allocate_exact_size(egui::Vec2::new(avail, bar_height), egui::Sense::hover());
+                        ui.painter().rect_filled(bar_rect, 1.5, self.theme.progress_track);
+                        if snapshot.progress.bytes_scanned > 0 {
+                            let pct = ((snapshot.progress.bytes_scanned as f64 / 1_000_000.0).min(1.0)) as f32;
+                            let fill_rect = egui::Rect::from_min_size(
+                                bar_rect.min,
+                                egui::Vec2::new(bar_rect.width() * pct.max(0.02), bar_height),
+                            );
+                            ui.painter().rect_filled(fill_rect, 1.5, self.theme.progress_fill);
+                        }
+                        ui.add_space(2.0);
+                    }
+
                     ui.horizontal(|ui| {
                         let (dot_color, status_text) = if snapshot.running {
                             (self.theme.warn, "扫描中")
@@ -839,15 +868,19 @@ impl TreeSizeApp {
                                 snapshot.progress.files_scanned, snapshot.progress.dirs_scanned
                             ));
                             ui.separator();
-                            ui.label(format!(
-                                "已扫描 {}",
-                                ByteSize(snapshot.progress.bytes_scanned)
-                            ));
+                            ui.label(format!("已扫描 {}", ByteSize(snapshot.progress.bytes_scanned)));
                             ui.separator();
                             let path = &snapshot.progress.current_path;
                             let max_chars = 60;
                             let display = if path.chars().count() > max_chars {
-                                let suffix: String = path.chars().rev().take(max_chars).collect::<Vec<_>>().into_iter().rev().collect();
+                                let suffix: String = path
+                                    .chars()
+                                    .rev()
+                                    .take(max_chars)
+                                    .collect::<Vec<_>>()
+                                    .into_iter()
+                                    .rev()
+                                    .collect();
                                 format!("…{}", suffix)
                             } else {
                                 path.clone()
@@ -866,17 +899,11 @@ impl TreeSizeApp {
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "{}px",
-                                    (18.0 * self.font_scale) as u32
-                                ))
-                                .color(self.theme.text_dim),
-                            );
-                            #[cfg(embedded_font)]
-                            ui.label(
-                                egui::RichText::new("Noto Sans SC")
+                                egui::RichText::new(format!("{}px", (16.0 * self.font_scale) as u32))
                                     .color(self.theme.text_dim),
                             );
+                            #[cfg(embedded_font)]
+                            ui.label(egui::RichText::new("Noto Sans SC").color(self.theme.text_dim));
                         });
                     });
                 });
@@ -890,8 +917,26 @@ impl TreeSizeApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     use Tab::*;
-                    let tabs = [Dashboard, Tree, Treemap, Sunburst, TopFiles, Classify, Duplicates, Waste, Trend, Collect];
+                    let tabs = [
+                        Dashboard, Tree, Treemap, Sunburst, TopFiles, Classify, Duplicates, Waste, Trend, Collect,
+                    ];
+                    let mut prev_group: Option<usize> = None;
                     for tab in tabs {
+                        let g = tab.group();
+                        // 跨组时插入分隔线
+                        if prev_group.is_some() && prev_group != Some(g) {
+                            ui.separator();
+                        }
+                        if prev_group != Some(g) {
+                            // 显示组标签
+                            ui.label(
+                                egui::RichText::new(TAB_GROUP_LABELS[g])
+                                    .color(self.theme.group_label)
+                                    .small(),
+                            );
+                            prev_group = Some(g);
+                        }
+
                         let selected = self.selected_tab == tab;
                         let badge = self.tab_badge(tab);
                         render_tab_button(ui, tab.label(), selected, badge, &self.theme, |ui| {
@@ -904,8 +949,7 @@ impl TreeSizeApp {
     }
 
     fn invalidate_cache_if_needed(&mut self, snapshot: &Snapshot) {
-        let cache_invalid = snapshot.generation != self.cache_generation
-            || self.cache_top_n != self.top_n;
+        let cache_invalid = snapshot.generation != self.cache_generation || self.cache_top_n != self.top_n;
         if cache_invalid {
             self.cache_generation = snapshot.generation;
             self.cache_top_n = self.top_n;
@@ -924,13 +968,15 @@ impl TreeSizeApp {
             return;
         }
 
-        let needs_compute = (self.selected_tab == Tab::Dashboard &&
-            (self.cached_top_files.is_none() || self.cached_top_dirs.is_none() ||
-             self.cached_classify.is_none() || self.cached_duplicates.is_none())) ||
-            (self.selected_tab == Tab::TopFiles && self.cached_all_files.is_none()) ||
-            (self.selected_tab == Tab::Classify && self.cached_classify.is_none()) ||
-            (self.selected_tab == Tab::Duplicates && self.cached_duplicates.is_none()) ||
-            (self.selected_tab == Tab::Waste && self.cached_waste.is_none());
+        let needs_compute = (self.selected_tab == Tab::Dashboard
+            && (self.cached_top_files.is_none()
+                || self.cached_top_dirs.is_none()
+                || self.cached_classify.is_none()
+                || self.cached_duplicates.is_none()))
+            || (self.selected_tab == Tab::TopFiles && self.cached_all_files.is_none())
+            || (self.selected_tab == Tab::Classify && self.cached_classify.is_none())
+            || (self.selected_tab == Tab::Duplicates && self.cached_duplicates.is_none())
+            || (self.selected_tab == Tab::Waste && self.cached_waste.is_none());
 
         if needs_compute && !self.cache_computing {
             self.cache_computing = true;
@@ -950,31 +996,56 @@ impl TreeSizeApp {
                     }
 
                     let node_clone = node.clone();
-                    drop(s);
+                    drop(s); // ⚡ 尽早释放 state 锁
 
+                    // ⚡ 先计算，不持有任何锁
+                    let (top_files, top_dirs, classify, duplicates, waste, all_files) = match selected_tab {
+                        Tab::Dashboard => {
+                            let tf = ReportService::top_n_files_report(&node_clone, top_n);
+                            let td = ReportService::top_n_dirs_report(&node_clone, top_n);
+                            let cl = ClassifyService::analyze(&node_clone);
+                            let dd = DuplicateService::scan(&node_clone, 1024);
+                            (Some(tf), Some(td), Some(cl), Some(dd), None, None)
+                        },
+                        Tab::TopFiles => {
+                            let af = ReportService::top_n_files_report(&node_clone, top_n.max(200));
+                            (None, None, None, None, None, Some(af))
+                        },
+                        Tab::Classify => {
+                            let cl = ClassifyService::analyze(&node_clone);
+                            (None, None, Some(cl), None, None, None)
+                        },
+                        Tab::Duplicates => {
+                            let dd = DuplicateService::scan(&node_clone, 1024);
+                            (None, None, None, Some(dd), None, None)
+                        },
+                        Tab::Waste => {
+                            let wa = WasteService::scan(&node_clone);
+                            (None, None, None, None, Some(wa), None)
+                        },
+                        _ => (None, None, None, None, None, None),
+                    };
+
+                    // ⚡ 计算完毕，短时间获取锁写入结果
                     let mut cache = compute_cache.lock().unwrap();
                     cache.generation = generation;
-
-                    match selected_tab {
-                        Tab::Dashboard => {
-                            cache.top_files = Some(ReportService::top_n_files_report(&node_clone, top_n));
-                            cache.top_dirs = Some(ReportService::top_n_dirs_report(&node_clone, top_n));
-                            cache.classify = Some(ClassifyService::analyze(&node_clone));
-                            cache.duplicates = Some(DuplicateService::scan(&node_clone, 1024));
-                        }
-                        Tab::TopFiles => {
-                            cache.all_files = Some(ReportService::top_n_files_report(&node_clone, top_n.max(200)));
-                        }
-                        Tab::Classify => {
-                            cache.classify = Some(ClassifyService::analyze(&node_clone));
-                        }
-                        Tab::Duplicates => {
-                            cache.duplicates = Some(DuplicateService::scan(&node_clone, 1024));
-                        }
-                        Tab::Waste => {
-                            cache.waste = Some(WasteService::scan(&node_clone));
-                        }
-                        _ => {}
+                    if let Some(v) = top_files {
+                        cache.top_files = Some(v);
+                    }
+                    if let Some(v) = top_dirs {
+                        cache.top_dirs = Some(v);
+                    }
+                    if let Some(v) = classify {
+                        cache.classify = Some(v);
+                    }
+                    if let Some(v) = duplicates {
+                        cache.duplicates = Some(v);
+                    }
+                    if let Some(v) = waste {
+                        cache.waste = Some(v);
+                    }
+                    if let Some(v) = all_files {
+                        cache.all_files = Some(v);
                     }
                 }
             });
@@ -983,12 +1054,24 @@ impl TreeSizeApp {
         if self.cache_computing {
             let mut cache = self.compute_cache.lock().unwrap();
             if cache.generation == snapshot.generation {
-                if let Some(tf) = cache.top_files.take() { self.cached_top_files = Some(tf); }
-                if let Some(td) = cache.top_dirs.take() { self.cached_top_dirs = Some(td); }
-                if let Some(cl) = cache.classify.take() { self.cached_classify = Some(cl); }
-                if let Some(dd) = cache.duplicates.take() { self.cached_duplicates = Some(dd); }
-                if let Some(wa) = cache.waste.take() { self.cached_waste = Some(wa); }
-                if let Some(af) = cache.all_files.take() { self.cached_all_files = Some(af); }
+                if let Some(tf) = cache.top_files.take() {
+                    self.cached_top_files = Some(tf);
+                }
+                if let Some(td) = cache.top_dirs.take() {
+                    self.cached_top_dirs = Some(td);
+                }
+                if let Some(cl) = cache.classify.take() {
+                    self.cached_classify = Some(cl);
+                }
+                if let Some(dd) = cache.duplicates.take() {
+                    self.cached_duplicates = Some(dd);
+                }
+                if let Some(wa) = cache.waste.take() {
+                    self.cached_waste = Some(wa);
+                }
+                if let Some(af) = cache.all_files.take() {
+                    self.cached_all_files = Some(af);
+                }
                 self.cache_computing = false;
             }
         }
@@ -1009,74 +1092,28 @@ impl TreeSizeApp {
 
     fn render_tree(&mut self, ui: &mut egui::Ui, state: &Snapshot) {
         if state.node.is_none() {
-            render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「📁 选择」目录后开始");
+            render_empty_state(ui, "尚未扫描", "在上方输入路径，或选择目录后开始");
             return;
         }
         let node = state.node.as_ref().unwrap();
 
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("排序：")
-                    .color(self.theme.text_secondary)
-                    .small(),
-            );
-            let sorts = [
-                (render::tree::TreeSortBy::SizeDesc, "大小↓"),
-                (render::tree::TreeSortBy::SizeAsc, "大小↑"),
-                (render::tree::TreeSortBy::NameAsc, "名称↓"),
-                (render::tree::TreeSortBy::NameDesc, "名称↑"),
-            ];
-            for (by, label) in &sorts {
-                let selected = self.tree_sort_by == *by;
-                let bg = if selected {
-                    self.theme.tab_active_bg
-                } else {
-                    self.theme.tab_inactive_bg
-                };
-                let btn = egui::Button::new(
-                    egui::RichText::new(*label)
-                        .color(self.theme.text_secondary)
-                        .small(),
-                )
-                .fill(bg)
-                .rounding(egui::Rounding::same(3.0))
-                .min_size(Vec2::new(0.0, 20.0));
-                if ui.add(btn).clicked() {
-                    self.tree_sort_by = *by;
-                }
-            }
-        });
-        ui.add_space(4.0);
-
-        let search_lower = self.search_text.to_lowercase();
-        let mut delete_request: Option<std::path::PathBuf> = None;
-
-        egui::ScrollArea::both().show(ui, |ui| {
-            render::tree::render_tree_node(
-                ui,
-                node,
-                node.size.0,
-                0,
-                self.show_hidden,
-                &self.search_text,
-                &search_lower,
-                self.search_case_sensitive,
-                self.search_match_full,
-                &self.theme,
-                &mut self.expanded_paths,
-                self.tree_sort_by,
-                &mut delete_request,
-            );
-        });
-
-        if let Some(path) = delete_request {
-            self.delete_confirm_path = Some(path);
-        }
+        render::tree::render_tree_panel(
+            ui,
+            node,
+            &self.theme,
+            &mut self.expanded_paths,
+            &mut self.tree_sort_by,
+            self.show_hidden,
+            &self.search_text,
+            self.search_case_sensitive,
+            self.search_match_full,
+            &mut self.delete_confirm_path,
+        );
     }
 
     fn render_treemap(&self, ui: &mut egui::Ui, state: &Snapshot) {
         if state.node.is_none() {
-            render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「📁 选择」目录后开始");
+            render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
             return;
         }
         let node = state.node.as_ref().unwrap();
@@ -1085,7 +1122,7 @@ impl TreeSizeApp {
 
     fn render_sunburst(&self, ui: &mut egui::Ui, state: &Snapshot) {
         if state.node.is_none() {
-            render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「📁 选择」目录后开始");
+            render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
             return;
         }
         let node = state.node.as_ref().unwrap();
@@ -1117,132 +1154,20 @@ impl TreeSizeApp {
                     "执行扫描后自动保存历史记录，或使用 CLI 的 --history-save 参数",
                 );
                 return;
-            }
+            },
         };
 
-        if trend.size_trend.is_empty() {
-            render_empty_state(
-                ui,
-                "暂无扫描历史",
-                "还没有该路径的历史记录，完成一次扫描后自动生成",
-            );
-            return;
-        }
-
-        ui.horizontal(|ui| {
-            let first = &trend.size_trend[0];
-            let last = trend.size_trend.last().unwrap();
-            let growth = last.total_size.saturating_sub(first.total_size);
-            let pct = if first.total_size > 0 {
-                (growth as f64 / first.total_size as f64) * 100.0
-            } else {
-                0.0
-            };
-            stat_card(ui, "扫描次数", &trend.snapshots.len().to_string(), self.theme.accent, &self.theme);
-            stat_card(ui, "首次", &first.date.format("%Y-%m-%d").to_string(), self.theme.text_secondary, &self.theme);
-            stat_card(ui, "最近", &last.date.format("%Y-%m-%d").to_string(), self.theme.text_secondary, &self.theme);
-            stat_card(ui, "增长", &format!("{} ({:.1}%)", ByteSize(growth), pct), self.theme.warn, &self.theme);
-        });
-
+        render::trend::render_trend_panel(ui, &trend, &self.theme);
         ui.add_space(8.0);
-        render::trend::trend_line_chart(ui, &trend, &self.theme);
-        ui.add_space(16.0);
-        ui.separator();
-        ui.add_space(8.0);
-        self.render_snapshot_diff_panel(ui, &trend);
-    }
-
-    fn render_snapshot_diff_panel(&mut self, ui: &mut egui::Ui, trend: &TrendReport) {
-        ui.heading(
-            egui::RichText::new("快照对比")
-                .color(self.theme.text_primary)
-                .strong(),
+        render::trend::render_snapshot_diff_panel(
+            ui,
+            &trend,
+            &self.theme,
+            &mut self.diff_old_selected,
+            &mut self.diff_new_selected,
+            &mut self.cached_diff,
+            &self.history_storage,
         );
-        ui.add_space(4.0);
-
-        if trend.snapshots.len() < 2 {
-            ui.label(
-                egui::RichText::new("需要至少 2 次扫描记录才能进行对比")
-                    .color(self.theme.text_secondary),
-            );
-            return;
-        }
-
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("旧快照：").color(self.theme.text_primary));
-            egui::ComboBox::from_id_source("diff_old_combo")
-                .selected_text(
-                    self.diff_old_selected
-                        .and_then(|id| trend.snapshots.iter().find(|s| s.id == Some(id)))
-                        .map(|s| s.scanned_at.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| "选择...".to_string()),
-                )
-                .show_ui(ui, |ui: &mut egui::Ui| {
-                    for snap in &trend.snapshots {
-                        if let Some(id) = snap.id {
-                            let label = snap.scanned_at.format("%Y-%m-%d %H:%M").to_string();
-                            ui.selectable_value(&mut self.diff_old_selected, Some(id), label);
-                        }
-                    }
-                });
-
-            ui.add_space(16.0);
-
-            ui.label(egui::RichText::new("新快照：").color(self.theme.text_primary));
-            egui::ComboBox::from_id_source("diff_new_combo")
-                .selected_text(
-                    self.diff_new_selected
-                        .and_then(|id| trend.snapshots.iter().find(|s| s.id == Some(id)))
-                        .map(|s| s.scanned_at.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| "选择...".to_string()),
-                )
-                .show_ui(ui, |ui: &mut egui::Ui| {
-                    for snap in &trend.snapshots {
-                        if let Some(id) = snap.id {
-                            let label = snap.scanned_at.format("%Y-%m-%d %H:%M").to_string();
-                            ui.selectable_value(&mut self.diff_new_selected, Some(id), label);
-                        }
-                    }
-                });
-
-            ui.add_space(16.0);
-
-            if ui.button("对比").clicked() {
-                self.compute_diff();
-            }
-        });
-
-        ui.add_space(8.0);
-
-        if let Some(ref diff) = self.cached_diff {
-            render::trend::render_diff_result(ui, diff, &self.theme);
-        }
-    }
-
-    fn compute_diff(&mut self) {
-        let old_id = match self.diff_old_selected {
-            Some(id) => id,
-            None => return,
-        };
-        let new_id = match self.diff_new_selected {
-            Some(id) => id,
-            None => return,
-        };
-
-        let storage = match self.history_storage.as_ref() {
-            Some(s) => s,
-            None => return,
-        };
-
-        match storage.get_diff_data(old_id, new_id) {
-            Ok((old, new, old_cats, new_cats, old_dirs, new_dirs)) => {
-                let diff = SnapshotDiffService::compare(&old, &new, &old_cats, &new_cats, &old_dirs, &new_dirs);
-                self.cached_diff = Some(diff);
-            }
-            Err(e) => {
-                tracing::error!("快照对比失败：{e}");
-            }
-        }
     }
 
     fn render_topn(&mut self, ui: &mut egui::Ui, state: &Snapshot) {
@@ -1278,12 +1203,12 @@ impl TreeSizeApp {
     fn render_collect(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("📂 添加目录").clicked() {
+                if ui.button("添加目录").clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
                         self.collect_path(path);
                     }
                 }
-                if ui.button("📄 添加文件").clicked() {
+                if ui.button("添加文件").clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
                         self.collect_path(path);
                     }
@@ -1295,8 +1220,7 @@ impl TreeSizeApp {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        egui::RichText::new(format!("🗑 删除已标记（{}）", marked))
-                                            .color(Color32::WHITE),
+                                        egui::RichText::new(format!("删除已标记（{}）", marked)).color(Color32::WHITE),
                                     )
                                     .fill(self.theme.danger),
                                 )
@@ -1344,7 +1268,11 @@ impl TreeSizeApp {
                     ui,
                     "待删除",
                     &marked.to_string(),
-                    if marked > 0 { self.theme.danger } else { self.theme.text_secondary },
+                    if marked > 0 {
+                        self.theme.danger
+                    } else {
+                        self.theme.text_secondary
+                    },
                     &self.theme,
                 );
             });
@@ -1366,35 +1294,41 @@ impl TreeSizeApp {
                     ui.label(egui::RichText::new("操作").strong().color(self.theme.text_primary));
                     ui.end_row();
 
-                    let items_snapshot: Vec<_> = self.drag_collector.items.iter()
-                        .map(|item| (item.name.clone(), item.size, item.is_dir, item.path.clone(), item.marked_for_deletion))
+                    let items_snapshot: Vec<_> = self
+                        .drag_collector
+                        .items
+                        .iter()
+                        .map(|item| {
+                            (
+                                item.name.clone(),
+                                item.size,
+                                item.is_dir,
+                                item.path.clone(),
+                                item.marked_for_deletion,
+                            )
+                        })
                         .collect();
 
                     for (i, (name, size, is_dir, path, marked)) in items_snapshot.iter().enumerate() {
-                        let icon = if *is_dir { "📁" } else { "📄" };
+                        let icon = if *is_dir { "文件夹" } else { "文件" };
                         ui.label(format!("{} {}", icon, name));
-
                         ui.label(ByteSize(*size).to_string());
-
                         let type_text = if *is_dir { "目录" } else { "文件" };
                         ui.label(type_text);
-
                         ui.label(
                             egui::RichText::new(path.display().to_string())
                                 .color(self.theme.text_secondary)
                                 .small(),
                         );
-
                         ui.horizontal(|ui| {
-                            let mark_label = if *marked { "✅ 已标记" } else { "☐ 标记删除" };
+                            let mark_label = if *marked { "已标记" } else { "标记删除" };
                             if ui.button(mark_label).clicked() {
                                 toggle_mark_idx = Some(i);
                             }
-                            if ui.button("✕ 移除").clicked() {
+                            if ui.button("移除").clicked() {
                                 remove_idx = Some(i);
                             }
                         });
-
                         ui.end_row();
                     }
                 });
@@ -1403,7 +1337,13 @@ impl TreeSizeApp {
                 self.drag_collector.remove(idx);
             }
             if let Some(idx) = toggle_mark_idx {
-                if self.drag_collector.items.get(idx).map(|i| i.marked_for_deletion).unwrap_or(false) {
+                if self
+                    .drag_collector
+                    .items
+                    .get(idx)
+                    .map(|i| i.marked_for_deletion)
+                    .unwrap_or(false)
+                {
                     self.drag_collector.unmark_for_deletion(idx);
                 } else {
                     self.drag_collector.mark_for_deletion(idx);
@@ -1415,7 +1355,7 @@ impl TreeSizeApp {
     fn collect_path(&mut self, path: std::path::PathBuf) {
         let is_dir = path.is_dir();
         let size = if is_dir {
-            dir_size_recursive(&path)
+            dir_size_recursive(&path, 64)
         } else {
             std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
         };
@@ -1427,7 +1367,10 @@ impl TreeSizeApp {
     }
 
     fn delete_marked_collected(&mut self) {
-        let marked: Vec<_> = self.drag_collector.items.iter()
+        let marked: Vec<_> = self
+            .drag_collector
+            .items
+            .iter()
             .enumerate()
             .filter(|(_, item)| item.marked_for_deletion)
             .map(|(_, item)| item.path.clone())
@@ -1444,26 +1387,39 @@ impl TreeSizeApp {
     }
 }
 
-fn create_scan_engine(options: &ScanOptions) -> Arc<dyn crate::domain::scan_engine::ScanEngine> {
+fn create_scan_engine(
+    options: &ScanOptions,
+    root_path: &std::path::Path,
+) -> Arc<dyn crate::domain::scan_engine::ScanEngine> {
+    // 解析 Auto 引擎类型
+    let engine_type = if options.engine == crate::domain::scan_engine::ScanEngineType::Auto {
+        let detected = detect_best_engine(root_path);
+        tracing::info!(target: "treesize::gui", "引擎自动选择结果：{}", detected);
+        detected
+    } else {
+        options.engine
+    };
+
     #[cfg(target_os = "windows")]
     {
-        match options.engine {
+        match engine_type {
             crate::domain::scan_engine::ScanEngineType::Mft => {
                 tracing::info!("GUI 使用 MFT 直接读取引擎（极速）");
                 Arc::new(MftScanEngine::new())
-            }
+            },
             crate::domain::scan_engine::ScanEngineType::Usn => {
                 tracing::info!("GUI 使用 USN Journal 增量引擎");
                 Arc::new(UsnScanEngine::new())
-            }
-            crate::domain::scan_engine::ScanEngineType::Fs => {
+            },
+            _ => {
                 tracing::info!("GUI 使用 FsScanEngine（文件系统遍历）");
                 Arc::new(FsScanEngine::new())
-            }
+            },
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = engine_type; // 非 Windows 始终用 Fs
         tracing::info!("GUI 使用 FsScanEngine（文件系统遍历）");
         Arc::new(FsScanEngine::new())
     }
@@ -1479,15 +1435,169 @@ fn delete_path(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
-fn dir_size_recursive(path: &Path) -> u64 {
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::FileNode;
+    use std::sync::Arc;
+
+    #[test]
+    fn scan_state_default_initial_state() {
+        let state = ScanState::default();
+        assert!(state.node.is_none());
+        assert!(state.stats.is_none());
+        assert!(!state.running);
+        assert!(state.error.is_none());
+        assert_eq!(state.generation, 0);
+    }
+
+    #[test]
+    fn scan_state_shared_creates_mutex() {
+        let shared = ScanState::shared();
+        let locked = shared.lock().unwrap();
+        assert_eq!(locked.generation, 0);
+    }
+
+    #[test]
+    fn scan_state_generation_increments() {
+        let state = Arc::new(Mutex::new(ScanState::default()));
+        {
+            let mut s = state.lock().unwrap();
+            s.generation = 5;
+            s.running = true;
+            s.node = Some(Arc::new(FileNode::new_dir(PathBuf::from("/test"), None)));
+        }
+        let snapshot = {
+            let s = state.lock().unwrap();
+            Snapshot {
+                node: s.node.clone(),
+                stats: s.stats.clone(),
+                progress: s.progress.clone(),
+                running: s.running,
+                error: s.error.clone(),
+                generation: s.generation,
+            }
+        };
+        assert_eq!(snapshot.generation, 5);
+        assert!(snapshot.running);
+        assert!(snapshot.node.is_some());
+        assert!(snapshot.stats.is_none());
+        assert!(snapshot.error.is_none());
+    }
+
+    #[test]
+    fn snapshot_transition_to_error() {
+        let state = Arc::new(Mutex::new(ScanState::default()));
+        {
+            let mut s = state.lock().unwrap();
+            s.running = false;
+            s.error = Some("测试错误".to_string());
+            s.generation = 2;
+        }
+        let snapshot = {
+            let s = state.lock().unwrap();
+            Snapshot {
+                node: s.node.clone(),
+                stats: s.stats.clone(),
+                progress: s.progress.clone(),
+                running: s.running,
+                error: s.error.clone(),
+                generation: s.generation,
+            }
+        };
+        assert!(!snapshot.running);
+        assert_eq!(snapshot.error, Some("测试错误".to_string()));
+        assert_eq!(snapshot.generation, 2);
+    }
+
+    #[test]
+    fn dir_size_recursive_depth_limit() {
+        // 创建一个深层嵌套的临时目录结构
+        let dir = std::env::temp_dir().join("treesize_test_depth");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // /depth_test/sub1/sub2/sub3/file.txt
+        let sub1 = dir.join("sub1");
+        std::fs::create_dir_all(&sub1).unwrap();
+        let sub2 = sub1.join("sub2");
+        std::fs::create_dir_all(&sub2).unwrap();
+        let sub3 = sub2.join("sub3");
+        std::fs::create_dir_all(&sub3).unwrap();
+        std::fs::write(sub3.join("file.txt"), b"hello").unwrap();
+
+        // max_depth = 0: 只扫描根，不考虑子目录
+        let size_depth0 = dir_size_recursive(&dir, 0);
+        assert_eq!(size_depth0, 0, "depth 0 不应扫描子目录");
+
+        // max_depth = 3: 应能扫到 file.txt
+        let size_depth3 = dir_size_recursive(&dir, 3);
+        assert_eq!(size_depth3, 5, "depth 3 应能扫到 file.txt");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tab_badge_mapping() {
+        // 验证各个 Tab 的 badge 返回值类型（不依赖实际数据）
+        let tabs_with_badge = [
+            super::Tab::TopFiles,
+            super::Tab::Classify,
+            super::Tab::Duplicates,
+            super::Tab::Waste,
+            super::Tab::Collect,
+        ];
+        assert_eq!(tabs_with_badge.len(), 5);
+        let tabs_without_badge = [Tab::Dashboard, Tab::Tree, Tab::Treemap, Tab::Sunburst, Tab::Trend];
+        assert_eq!(tabs_without_badge.len(), 5);
+    }
+}
+
+/// 检测系统是否为深色主题模式
+fn detect_system_dark_mode() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // 通过 reg.exe 查询 Windows 主题设置
+        if let Ok(output) = std::process::Command::new("reg")
+            .args([
+                "query",
+                "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                "/v",
+                "AppsUseLightTheme",
+            ])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&output.stdout);
+            // 输出类似: AppsUseLightTheme  REG_DWORD  0x1
+            if let Some(part) = s.split_whitespace().last() {
+                if let Ok(val) = u32::from_str_radix(part.trim_start_matches("0x"), 16) {
+                    return val == 0; // 0 = 深色, 1 = 浅色
+                }
+            }
+        }
+    }
+    // 默认返回深色主题
+    true
+}
+
+/// 迭代计算目录大小，max_depth 限制递归深度（防止栈溢出/无限循环）
+fn dir_size_recursive(path: &Path, max_depth: usize) -> u64 {
     let mut total = 0u64;
-    if let Ok(entries) = std::fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                total += dir_size_recursive(&path);
-            } else if let Ok(meta) = entry.metadata() {
-                total += meta.len();
+    let mut stack: Vec<(PathBuf, usize)> = Vec::new();
+    stack.push((path.to_path_buf(), 0));
+
+    while let Some((dir_path, depth)) = stack.pop() {
+        if depth > max_depth {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir_path) {
+            for entry in entries.flatten() {
+                let child_path = entry.path();
+                if child_path.is_dir() {
+                    stack.push((child_path, depth + 1));
+                } else if let Ok(meta) = entry.metadata() {
+                    total += meta.len();
+                }
             }
         }
     }

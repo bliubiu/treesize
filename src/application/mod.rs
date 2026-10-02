@@ -16,9 +16,7 @@ pub use classify_service::{ClassifyReport, ClassifyService};
 pub use diff_service::SnapshotDiffService;
 pub use duplicate_service::{DuplicateGroup, DuplicateReport, DuplicateService};
 pub use icicle::{compute_layout_v2, render_svg, IcicleBlock, IcicleDirection, LayoutConfig};
-pub use models::{
-    CategoryDiff, CategoryTrend, DirDiff, GrowthEntry, SizePoint, SnapshotDiff, TrendReport,
-};
+pub use models::{CategoryDiff, CategoryTrend, DirDiff, GrowthEntry, SizePoint, SnapshotDiff, TrendReport};
 pub use report_service::{ReportService, TopNEntry};
 pub use scan_service::ScanService;
 pub use trend_service::TrendService;

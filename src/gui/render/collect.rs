@@ -2,6 +2,7 @@
 
 use egui::Color32;
 
+use crate::domain::drag_collector::CollectedItem;
 use crate::domain::value_objects::ByteSize;
 use crate::gui::theme::ThemeColors;
 use crate::gui::widgets;
@@ -13,21 +14,21 @@ pub struct CollectDelegates<'a> {
 }
 
 /// 渲染文件收集面板
-pub(crate) fn render_collect(
+pub(crate) fn _render_collect(
     ui: &mut egui::Ui,
     theme: &ThemeColors,
-    items: &mut Vec<crate::domain::CollectedItem>,
+    items: &mut Vec<CollectedItem>,
     delegates: &mut CollectDelegates<'_>,
 ) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         // ── 文件/目录选择按钮 ──
         ui.horizontal(|ui| {
-            if ui.button("📂 添加目录").clicked() {
+            if ui.button("添加目录").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     (delegates.collect_path)(path);
                 }
             }
-            if ui.button("📄 添加文件").clicked() {
+            if ui.button("添加文件").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_file() {
                     (delegates.collect_path)(path);
                 }
@@ -39,8 +40,7 @@ pub(crate) fn render_collect(
                         if ui
                             .add(
                                 egui::Button::new(
-                                    egui::RichText::new(format!("🗑 删除已标记（{}）", marked))
-                                        .color(Color32::WHITE),
+                                    egui::RichText::new(format!("删除已标记（{}）", marked)).color(Color32::WHITE),
                                 )
                                 .fill(theme.danger),
                             )
@@ -73,7 +73,13 @@ pub(crate) fn render_collect(
         let marked = items.iter().filter(|i| i.marked_for_deletion).count();
         ui.horizontal(|ui| {
             widgets::stat_card(ui, "已收集", &items.len().to_string(), theme.accent, theme);
-            widgets::stat_card(ui, "总大小", &ByteSize(total_size).to_string(), theme.text_primary, theme);
+            widgets::stat_card(
+                ui,
+                "总大小",
+                &ByteSize(total_size).to_string(),
+                theme.text_primary,
+                theme,
+            );
             widgets::stat_card(
                 ui,
                 "待删除",
@@ -101,15 +107,22 @@ pub(crate) fn render_collect(
                 ui.label(egui::RichText::new("操作").strong().color(theme.text_primary));
                 ui.end_row();
 
-                let items_snapshot: Vec<_> = items
+                // 快照避免 borrow 冲突
+                let snapshot: Vec<_> = items
                     .iter()
                     .map(|item| {
-                        (item.name.clone(), item.size, item.is_dir, item.path.clone(), item.marked_for_deletion)
+                        (
+                            item.name.clone(),
+                            item.size,
+                            item.is_dir,
+                            item.path.clone(),
+                            item.marked_for_deletion,
+                        )
                     })
                     .collect();
 
-                for (i, (name, size, is_dir, path, marked)) in items_snapshot.iter().enumerate() {
-                    let icon = if *is_dir { "📁" } else { "📄" };
+                for (i, (name, size, is_dir, path, marked)) in snapshot.iter().enumerate() {
+                    let icon = if *is_dir { "□" } else { "○" };
                     ui.label(format!("{} {}", icon, name));
                     ui.label(ByteSize(*size).to_string());
                     let type_text = if *is_dir { "目录" } else { "文件" };
@@ -121,11 +134,11 @@ pub(crate) fn render_collect(
                     );
 
                     ui.horizontal(|ui| {
-                        let mark_label = if *marked { "✅ 已标记" } else { "☐ 标记删除" };
+                        let mark_label = if *marked { "已标记" } else { "标记删除" };
                         if ui.button(mark_label).clicked() {
                             toggle_mark_idx = Some(i);
                         }
-                        if ui.button("✕ 移除").clicked() {
+                        if ui.button("移除").clicked() {
                             remove_idx = Some(i);
                         }
                     });

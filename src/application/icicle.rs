@@ -535,6 +535,37 @@ mod tests {
     }
 
     #[test]
+    fn layout_empty_tree() {
+        let blocks = compute_layout_v2(
+            &FileNode::new_dir(PathBuf::from("/empty"), None),
+            &LayoutConfig::default(),
+        );
+        assert_eq!(blocks.len(), 1, "empty tree should produce exactly one root block");
+        assert_eq!(blocks[0].depth, 0, "root block must be at depth 0");
+    }
+
+    #[test]
+    fn layout_depth_limit_truncates() {
+        let mut root = FileNode::new_dir(PathBuf::from("/root"), None);
+        let mut child = FileNode::new_dir(PathBuf::from("/root/c1"), None);
+        let mut grand = FileNode::new_dir(PathBuf::from("/root/c1/c2"), None);
+        grand
+            .children
+            .push(FileNode::new_file(PathBuf::from("/root/c1/c2/f.txt"), 100, None));
+        child.children.push(grand);
+        root.children.push(child);
+        root.aggregate();
+
+        let cfg = LayoutConfig {
+            max_depth: 2,
+            ..Default::default()
+        };
+        let blocks = compute_layout_v2(&root, &cfg);
+        let max_seen = blocks.iter().map(|b| b.depth).max().unwrap_or(0);
+        assert!(max_seen <= cfg.max_depth, "depth should be capped at max_depth");
+    }
+
+    #[test]
     fn truncate_label_works() {
         assert_eq!(truncate_label("hello", 100.0, 11.0), "hello");
         let t = truncate_label("very long file name here.txt", 50.0, 11.0);

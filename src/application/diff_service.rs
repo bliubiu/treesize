@@ -5,9 +5,7 @@
 use std::collections::HashMap;
 
 use crate::application::models::{CategoryDiff, DirDiff, SnapshotDiff};
-use crate::domain::scan_history::{
-    CategorySnapshot, DirSizeSnapshot, ScanSnapshot,
-};
+use crate::domain::scan_history::{CategorySnapshot, DirSizeSnapshot, ScanSnapshot};
 
 /// 快照对比服务
 pub struct SnapshotDiffService;
@@ -41,8 +39,7 @@ impl SnapshotDiffService {
         let dir_delta = new.total_dirs as i64 - old.total_dirs as i64;
 
         // 对比目录变化
-        let (dir_diffs, new_dirs_list, removed_dirs_list) =
-            Self::compare_dirs(old_dirs, new_dirs);
+        let (dir_diffs, new_dirs_list, removed_dirs_list) = Self::compare_dirs(old_dirs, new_dirs);
 
         // 对比分类变化
         let category_diffs = Self::compare_categories(old_cats, new_cats);
@@ -66,15 +63,9 @@ impl SnapshotDiffService {
         old_dirs: &[DirSizeSnapshot],
         new_dirs: &[DirSizeSnapshot],
     ) -> (Vec<DirDiff>, Vec<DirDiff>, Vec<DirDiff>) {
-        let old_map: HashMap<&str, u64> = old_dirs
-            .iter()
-            .map(|d| (d.relative_path.as_str(), d.size))
-            .collect();
+        let old_map: HashMap<&str, u64> = old_dirs.iter().map(|d| (d.relative_path.as_str(), d.size)).collect();
 
-        let new_map: HashMap<&str, u64> = new_dirs
-            .iter()
-            .map(|d| (d.relative_path.as_str(), d.size))
-            .collect();
+        let new_map: HashMap<&str, u64> = new_dirs.iter().map(|d| (d.relative_path.as_str(), d.size)).collect();
 
         let mut dir_diffs = Vec::new();
         let mut new_dirs_list = Vec::new();
@@ -121,28 +112,15 @@ impl SnapshotDiffService {
     }
 
     /// 对比分类统计
-    fn compare_categories(
-        old_cats: &[CategorySnapshot],
-        new_cats: &[CategorySnapshot],
-    ) -> Vec<CategoryDiff> {
-        let old_map: HashMap<&str, &CategorySnapshot> = old_cats
-            .iter()
-            .map(|c| (c.category.as_str(), c))
-            .collect();
+    fn compare_categories(old_cats: &[CategorySnapshot], new_cats: &[CategorySnapshot]) -> Vec<CategoryDiff> {
+        let old_map: HashMap<&str, &CategorySnapshot> = old_cats.iter().map(|c| (c.category.as_str(), c)).collect();
 
-        let new_map: HashMap<&str, &CategorySnapshot> = new_cats
-            .iter()
-            .map(|c| (c.category.as_str(), c))
-            .collect();
+        let new_map: HashMap<&str, &CategorySnapshot> = new_cats.iter().map(|c| (c.category.as_str(), c)).collect();
 
         let mut diffs = Vec::new();
 
         // 检查所有分类（合并新旧）
-        let all_categories: std::collections::HashSet<&str> = old_map
-            .keys()
-            .chain(new_map.keys())
-            .copied()
-            .collect();
+        let all_categories: std::collections::HashSet<&str> = old_map.keys().chain(new_map.keys()).copied().collect();
 
         for category in all_categories {
             let old = old_map.get(category);
@@ -231,8 +209,7 @@ mod tests {
             },
         ];
 
-        let (diffs, new_list, removed_list) =
-            SnapshotDiffService::compare_dirs(&old_dirs, &new_dirs);
+        let (diffs, new_list, removed_list) = SnapshotDiffService::compare_dirs(&old_dirs, &new_dirs);
 
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].name, "dir1");
@@ -292,5 +269,35 @@ mod tests {
         let img_diff = diffs.iter().find(|d| d.category == "图片").unwrap();
         assert_eq!(img_diff.size_delta(), -200);
         assert_eq!(img_diff.count_delta(), -20);
+    }
+
+    #[test]
+    fn test_compare_size_decrease() {
+        let old = make_snapshot("/test", 200, 20, 2000);
+        let new = make_snapshot("/test", 150, 15, 1000);
+
+        let diff = SnapshotDiffService::compare(&old, &new, &[], &[], &[], &[]);
+
+        assert_eq!(diff.size_delta, -1000);
+        assert_eq!(diff.file_delta, -50);
+        assert_eq!(diff.dir_delta, -5);
+        assert!((diff.size_delta_pct - (-50.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_compare_identical() {
+        let old = make_snapshot("/test", 100, 10, 1000);
+        let new = make_snapshot("/test", 100, 10, 1000);
+
+        let diff = SnapshotDiffService::compare(&old, &new, &[], &[], &[], &[]);
+
+        assert_eq!(diff.size_delta, 0);
+        assert_eq!(diff.file_delta, 0);
+        assert_eq!(diff.dir_delta, 0);
+        assert!((diff.size_delta_pct - 0.0).abs() < 0.01);
+        assert!(diff.dir_diffs.is_empty());
+        assert!(diff.new_dirs.is_empty());
+        assert!(diff.removed_dirs.is_empty());
+        assert!(diff.category_diffs.is_empty());
     }
 }

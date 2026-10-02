@@ -15,7 +15,7 @@ pub(crate) fn render_waste(
     cached_waste: &Option<WasteReport>,
 ) {
     if state.node.is_none() {
-        widgets::render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「📁 选择」目录后开始");
+        widgets::render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
         return;
     }
     let Some(report) = cached_waste.as_ref() else {
@@ -33,7 +33,13 @@ pub(crate) fn render_waste(
         ui.horizontal(|ui| {
             widgets::stat_card(ui, "浪费项", &report.items.len().to_string(), theme.warn, theme);
             widgets::stat_card(ui, "总浪费空间", &report.total_wasted.to_string(), theme.danger, theme);
-            widgets::stat_card(ui, "可自动清理", &report.auto_cleanable.to_string(), theme.success, theme);
+            widgets::stat_card(
+                ui,
+                "可自动清理",
+                &report.auto_cleanable.to_string(),
+                theme.success,
+                theme,
+            );
         });
 
         ui.add_space(8.0);
@@ -98,8 +104,7 @@ pub(crate) fn render_waste(
 
             if i >= 99 {
                 ui.label(
-                    egui::RichText::new(format!("... 还有 {} 项", report.items.len() - 100))
-                        .color(theme.text_dim),
+                    egui::RichText::new(format!("... 还有 {} 项", report.items.len() - 100)).color(theme.text_dim),
                 );
                 break;
             }

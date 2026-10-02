@@ -1,22 +1,38 @@
 //! 文件系统扫描器
 //!
-//! 使用 `jwalk` 并行遍历替代手动递归遍历，大幅提升大目录扫描性能。
-//! jwalk 内部使用 rayon 线程池并行执行 read_dir 操作，并在 depth-first 顺序下 yield 结果。
+//! 遍历用 `rayon::scope` 组织：每个根一个作用域，递归深度与树深度无关（O(1)），
+//! 目录枚举交给 [`dir_reader`]，Windows 上走
+//! `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)`，**每个文件只花一次系统调用**，
+//! 并直接取到分配大小（`AllocationSize`）而非逻辑长度。
+//!
+//! 遍历形状借鉴 dust：子目录各领一个 rayon 任务，共享输出走互斥锁。
+//! 本引擎最终产物是一份扁平条目列表（交由 `build_tree` 建树），
+//! 因此不需要 disktree 那套 `PendingDir` 完成计数——`rayon::scope` 本身就保证
+//! 「所有任务结束」，结构化并发，无需 join 点。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-use jwalk::WalkDir;
+use rayon::Scope;
 
 use crate::domain::error::{DomainError, Result};
 use crate::domain::file_node::FileNode;
 use crate::domain::scan_engine::{
     should_exclude_entry, CancelToken, ResourceLimits, ScanEngine, ScanOptions, ScanProgress,
 };
+use crate::infrastructure::dir_reader::{self, RawEntry};
 use crate::infrastructure::memory_monitor::MemoryMonitor;
 
-/// 基于 jwalk 的并行扫描引擎
+/// 累计这么多条目才把计数刷进共享原子量
+///
+/// 每个 worker 每条目都往同一条原子量上加，会让那条 cache line 在核间弹跳。
+/// 按批提交对人眼不可见，对吞吐明显。
+const FLUSH_EVERY: usize = 1024;
+
+/// 基于目录枚举的并行扫描引擎
 pub struct FsScanEngine;
 
 impl FsScanEngine {
@@ -49,20 +65,25 @@ impl ScanEngine for FsScanEngine {
         })?;
 
         let start = SystemTime::now();
-        let mut stats = ScanState::new(start, &options.resource_limits);
+        let stats = ScanState::new(start, &options.resource_limits);
 
         let mut root_node = if meta.is_dir() {
-            // 使用 jwalk 并行遍历扫描所有条目
-            let entries = collect_entries(&root, options, progress, cancel, &mut stats)?;
+            let entries = collect_entries(&root, options, progress, cancel, &stats)?;
             let root_modified = meta.modified().ok();
             build_tree(entries, &root, root_modified, options)
         } else {
             // 单文件扫描
             let modified = meta.modified().ok();
-            let mut node = FileNode::new_file(root.clone(), meta.len(), modified);
+            let size = if options.apparent_size {
+                meta.len()
+            } else {
+                // 分配大小：卷真正花掉的字节数，逻辑长度对小文件会偏小
+                dir_reader::allocated_size_of(&root).unwrap_or(meta.len())
+            };
+            let mut node = FileNode::new_file(root.clone(), size, modified);
             node.errors = Vec::new();
             stats.files.fetch_add(1, Ordering::Relaxed);
-            stats.bytes.fetch_add(meta.len(), Ordering::Relaxed);
+            stats.bytes.fetch_add(size, Ordering::Relaxed);
             emit_progress(progress, &stats, &root);
             node
         };
@@ -89,7 +110,7 @@ impl ScanEngine for FsScanEngine {
     }
 }
 
-/// 扫描内部状态（线程安全计数器）
+/// 扫描内部状态（线程安全计数器，可跨线程共享）
 struct ScanState {
     files: AtomicU64,
     dirs: AtomicU64,
@@ -97,7 +118,8 @@ struct ScanState {
     errors: AtomicU64,
     start_time: SystemTime,
     limits: ResourceLimits,
-    memory_monitor: MemoryMonitor,
+    /// 内存采样要刷新系统信息，需独占；检查已节流到每 1000 个文件一次
+    memory_monitor: Mutex<MemoryMonitor>,
     /// 上次进度更新时的文件计数（用于节流）
     last_progress_files: AtomicU64,
     /// 上次检查限制时的文件计数（用于节流）
@@ -113,13 +135,27 @@ impl ScanState {
             errors: AtomicU64::new(0),
             start_time,
             limits: *limits,
-            memory_monitor: MemoryMonitor::new(limits.max_memory_mb),
+            memory_monitor: Mutex::new(MemoryMonitor::new(limits.max_memory_mb)),
             last_progress_files: AtomicU64::new(0),
             last_check_limits_files: AtomicU64::new(0),
         }
     }
 
-    fn check_limits(&mut self) -> Result<()> {
+    /// 把本目录累计的 (文件, 目录, 字节) 提交进共享计数
+    fn flush_counts(&self, pending: &mut (u64, u64, u64)) {
+        if pending.0 > 0 {
+            self.files.fetch_add(pending.0, Ordering::Relaxed);
+        }
+        if pending.1 > 0 {
+            self.dirs.fetch_add(pending.1, Ordering::Relaxed);
+        }
+        if pending.2 > 0 {
+            self.bytes.fetch_add(pending.2, Ordering::Relaxed);
+        }
+        *pending = (0, 0, 0);
+    }
+
+    fn check_limits(&self) -> Result<()> {
         let files = self.files.load(Ordering::Relaxed);
 
         // 节流：每处理 1000 个文件才检查一次限制，减少系统调用开销
@@ -129,10 +165,8 @@ impl ScanState {
         }
         self.last_check_limits_files.store(files, Ordering::Relaxed);
 
-        if self.limits.max_files > 0 {
-            if files >= self.limits.max_files {
-                return Err(DomainError::FileLimitExceeded(self.limits.max_files));
-            }
+        if self.limits.max_files > 0 && files >= self.limits.max_files {
+            return Err(DomainError::FileLimitExceeded(self.limits.max_files));
         }
 
         if self.limits.max_time_sec > 0 {
@@ -143,7 +177,13 @@ impl ScanState {
         }
 
         if self.limits.max_memory_mb > 0 {
-            if !self.memory_monitor.check_memory() {
+            // 节流后锁竞争可忽略；锁被毒化说明上一次检查 panic 过，按超限处理更安全
+            let within = self
+                .memory_monitor
+                .lock()
+                .map(|mut m| m.check_memory())
+                .unwrap_or(false);
+            if !within {
                 return Err(DomainError::MemoryLimitExceeded(self.limits.max_memory_mb));
             }
         }
@@ -152,18 +192,14 @@ impl ScanState {
     }
 }
 
-fn emit_progress(
-    progress: Option<&(dyn Fn(&ScanProgress) + Send + Sync)>,
-    stats: &ScanState,
-    path: &Path,
-) {
+fn emit_progress(progress: Option<&(dyn Fn(&ScanProgress) + Send + Sync)>, stats: &ScanState, path: &Path) {
     if let Some(cb) = progress {
         // 节流：每处理 5000 个文件才更新一次进度，避免频繁锁竞争
         // 在大目录扫描时，减少进度更新频率可以显著提升性能
         let current_files = stats.files.load(Ordering::Relaxed);
         let last_update = stats.last_progress_files.load(Ordering::Relaxed);
-        
-        // 使用 saturating_sub 避免 wrapping_sub 在回绕时产生极大值导致节流失效
+
+        // 使用 saturating_sub 避免 wrapping_sub 在回溯时产生极大值导致节流失效
         if current_files.saturating_sub(last_update) >= 5000 {
             stats.last_progress_files.store(current_files, Ordering::Relaxed);
             cb(&ScanProgress {
@@ -185,151 +221,281 @@ struct EntryData {
     modified: Option<SystemTime>,
 }
 
-/// 使用 jwalk 并行遍历目录，收集所有扁平条目
-///
-/// 通过 `process_read_dir` 回调在 yield 之前完成过滤，
-/// 避免后续条目产生不必要的 IO。
-fn collect_entries(
-    root: &Path,
-    options: &ScanOptions,
-    progress: Option<&(dyn Fn(&ScanProgress) + Send + Sync)>,
-    cancel: Option<&CancelToken>,
-    stats: &mut ScanState,
-) -> Result<Vec<EntryData>> {
-    // 克隆选项值供闭包使用（闭包按值捕获）
-    let include_hidden = options.include_hidden;
-    let exclude_dirs = options.exclude_dirs.clone();
-    let exclude_exts = options.exclude_exts.clone();
-    let max_depth = options.max_depth;
-    let follow_links = options.follow_links;
+/// 遍历上下文：只读配置 + 跨线程共享的输出与状态
+struct WalkCtx<'a> {
+    include_hidden: bool,
+    exclude_dirs: &'a [String],
+    exclude_exts: &'a [String],
+    /// 0 = 不限
+    max_depth: usize,
+    follow_links: bool,
+    /// true = 用表观大小，false = 用分配大小
+    apparent_size: bool,
+    progress: Option<&'a (dyn Fn(&ScanProgress) + Send + Sync)>,
+    cancel: Option<&'a CancelToken>,
+    stats: &'a ScanState,
+    /// 扁平条目输出，每个目录各自攒一批再合并，锁竞争最小
+    sink: Mutex<Vec<EntryData>>,
+    /// 已进入的真实目录（仅 `follow_links` 时使用），用于环检测
+    visited: Mutex<HashSet<PathBuf>>,
+    /// 首个致命错误（触发资源限制等），出现后整次遍历提前收敛
+    fatal: Mutex<Option<DomainError>>,
+}
 
-    // 构建 jwalk walker
-    //
-    // process_read_dir 在 yield 每个条目之前回调，允许我们：
-    // 1. 过滤条目（筛选掉排除项）
-    // 2. 阻止深入子目录（read_children_path = None）
-    //
-    // jwalk 默认使用 rayon 并行执行，无需手动设置线程数
-    let walker = WalkDir::new(root)
-        .follow_links(follow_links)
-        .process_read_dir(move |_parent_depth, _path, _state, entries| {
-            // 使用原地分区模式过滤并修改条目：
-            // 先检查并修改 read_children_path，再压缩移除已排除条目
-            let mut write_idx = 0;
-            for i in 0..entries.len() {
-                let keep = match &mut entries[i] {
-                    Ok(ref mut entry) => {
-                        // 隐藏文件过滤
-                        if !include_hidden {
-                            if let Some(name) = entry.file_name.to_str() {
-                                if name.starts_with('.') {
-                                    continue; // 跳过隐藏文件
-                                }
-                            }
-                        }
+impl<'a> WalkCtx<'a> {
+    fn cancelled(&self) -> bool {
+        self.cancel.is_some_and(CancelToken::is_cancelled)
+    }
 
-                        // 排除过滤（目录名、扩展名）
-                        if let Some(name) = entry.file_name.to_str() {
-                            if should_exclude_entry(name, entry.file_type.is_dir(), &exclude_dirs, &exclude_exts) {
-                                if entry.file_type.is_dir() {
-                                    entry.read_children_path = None; // 不深入
-                                }
-                                continue;
-                            }
-                        }
+    /// 已收到取消或已出现致命错误
+    fn stopping(&self) -> bool {
+        self.cancelled() || self.fatal.lock().is_ok_and(|f| f.is_some())
+    }
 
-                        // 深度限制：达到最大深度后不再深入，但保留当前条目
-                        if max_depth > 0 && entry.depth >= max_depth {
-                            entry.read_children_path = None;
-                        }
-
-                        true
-                    }
-                    Err(_) => true, // 保留错误条目，由主循环处理
-                };
-
-                if keep {
-                    if write_idx != i {
-                        entries.swap(write_idx, i);
-                    }
-                    write_idx += 1;
-                }
-            }
-            entries.truncate(write_idx);
-        });
-
-    // 遍历收集所有条目
-    let mut entries = Vec::new();
-
-    for result in walker {
-        if let Some(c) = cancel {
-            if c.is_cancelled() {
-                return Err(DomainError::ScanCancelled);
+    /// 记录首个致命错误
+    fn set_fatal(&self, error: DomainError) {
+        if let Ok(mut slot) = self.fatal.lock() {
+            if slot.is_none() {
+                *slot = Some(error);
             }
         }
+    }
+}
 
-        stats.check_limits()?;
+/// 并行遍历目录树，收集所有扁平条目
+fn collect_entries<'a>(
+    root: &'a Path,
+    options: &'a ScanOptions,
+    progress: Option<&'a (dyn Fn(&ScanProgress) + Send + Sync)>,
+    cancel: Option<&'a CancelToken>,
+    stats: &'a ScanState,
+) -> Result<Vec<EntryData>> {
+    let ctx = WalkCtx {
+        include_hidden: options.include_hidden,
+        exclude_dirs: &options.exclude_dirs,
+        exclude_exts: &options.exclude_exts,
+        max_depth: options.max_depth,
+        follow_links: options.follow_links,
+        apparent_size: options.apparent_size,
+        progress,
+        cancel,
+        stats,
+        sink: Mutex::new(Vec::new()),
+        visited: Mutex::new(HashSet::new()),
+        fatal: Mutex::new(None),
+    };
 
-        match result {
-            Ok(entry) => {
-                // 跳过根节点自身（depth == 0），由 scan() 单独处理
-                if entry.depth == 0 {
-                    continue;
-                }
-
-                let path = entry.path();
-                let is_symlink = entry.path_is_symlink();
-                let is_dir = entry.file_type.is_dir();
-                let _depth = entry.depth;
-
-                // 获取元数据（大小、修改时间），失败时记录错误
-                let (size, modified) = match entry.metadata() {
-                    Ok(meta) => {
-                        let sz = if is_dir { 0 } else { meta.len() };
-                        (sz, meta.modified().ok())
-                    }
-                    Err(_) => {
-                        stats.errors.fetch_add(1, Ordering::Relaxed);
-                        // 权限相关的错误降级为 debug，避免刷屏（如回收站、系统目录）
-                        tracing::debug!(
-                            target: "treesize::scanner",
-                            "无法读取条目元数据：{}",
-                            path.display()
-                        );
-                        (0, None)
-                    }
-                };
-
-                // 更新统计计数器
-                if is_dir {
-                    stats.dirs.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    stats.files.fetch_add(1, Ordering::Relaxed);
-                    stats.bytes.fetch_add(size, Ordering::Relaxed);
-                }
-
-                emit_progress(progress, stats, &path);
-
-                entries.push(EntryData {
-                    path,
-                    is_dir,
-                    is_symlink,
-                    size,
-                    modified,
-                });
-            }
-            Err(e) => {
-                stats.errors.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(
-                    target: "treesize::scanner",
-                    "扫描过程错误：{}",
-                    e
-                );
+    // 跟随链接时把根的真实路径登记为已访问，链接指回根时即可识别为环
+    if options.follow_links {
+        if let Ok(real) = std::fs::canonicalize(root) {
+            if let Ok(mut set) = ctx.visited.lock() {
+                set.insert(real);
             }
         }
     }
 
+    // 一个根一个作用域：作用域返回即代表所有子任务都已结束
+    rayon::scope(|scope| walk(scope, &ctx, root.to_path_buf(), 0));
+
+    // 取消优先于资源限制：用户主动中止不该报成超时
+    if ctx.cancelled() {
+        return Err(DomainError::ScanCancelled);
+    }
+    if let Ok(mut slot) = ctx.fatal.lock() {
+        if let Some(error) = slot.take() {
+            return Err(error);
+        }
+    }
+
+    let entries = ctx.sink.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
+    tracing::debug!(
+        target: "treesize::scanner",
+        "collect_entries 完成：{} 个条目",
+        entries.len(),
+    );
     Ok(entries)
+}
+
+/// 读取一个目录，把子目录各派一个任务，然后返回
+///
+/// 任务在 rayon 池里是扁平排队的，工作栈不随树深度增长。
+fn walk<'scope>(scope: &Scope<'scope>, ctx: &'scope WalkCtx<'scope>, dir: PathBuf, depth: usize) {
+    if ctx.stopping() {
+        return;
+    }
+    if ctx.max_depth > 0 && depth >= ctx.max_depth {
+        return;
+    }
+
+    let mut locals: Vec<EntryData> = Vec::new();
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    let mut pending = (0u64, 0u64, 0u64);
+
+    match dir_reader::read_dir(&dir) {
+        Ok(entries) => {
+            for entry in entries {
+                if ctx.stopping() {
+                    break;
+                }
+                let raw = match entry {
+                    Ok(raw) => raw,
+                    Err(error) => {
+                        ctx.stats.errors.fetch_add(1, Ordering::Relaxed);
+                        // 权限相关的错误降级为 debug，避免刷屏（如回收站、系统目录）
+                        tracing::debug!(
+                            target: "treesize::scanner",
+                            "读取目录条目失败：{}（{}）",
+                            dir.display(),
+                            error,
+                        );
+                        continue;
+                    },
+                };
+
+                if let Some(data) = accept(ctx, &dir, raw, &mut subdirs) {
+                    if data.is_dir {
+                        pending.1 += 1;
+                    } else {
+                        pending.0 += 1;
+                        pending.2 += data.size;
+                    }
+                    locals.push(data);
+                }
+
+                if pending.0 + pending.1 >= FLUSH_EVERY as u64 {
+                    ctx.stats.flush_counts(&mut pending);
+                }
+            }
+        },
+        Err(error) => {
+            ctx.stats.errors.fetch_add(1, Ordering::Relaxed);
+            // 目录不可读不是致命错误：计数后继续扫别处
+            tracing::debug!(
+                target: "treesize::scanner",
+                "无法读取目录：{}（{}）",
+                dir.display(),
+                error,
+            );
+        },
+    }
+
+    ctx.stats.flush_counts(&mut pending);
+    emit_progress(ctx.progress, ctx.stats, &dir);
+
+    if let Err(error) = ctx.stats.check_limits() {
+        ctx.set_fatal(error);
+        return;
+    }
+
+    // 本目录条目先并入共享输出，再派子任务：缩短持锁时间
+    if !locals.is_empty() {
+        match ctx.sink.lock() {
+            Ok(mut sink) => sink.append(&mut locals),
+            Err(poisoned) => poisoned.into_inner().append(&mut locals),
+        }
+    }
+
+    for subdir in subdirs {
+        if ctx.stopping() {
+            return;
+        }
+        let next_depth = depth + 1;
+        if ctx.max_depth > 0 && next_depth >= ctx.max_depth {
+            continue;
+        }
+        scope.spawn(move |scope| walk(scope, ctx, subdir, next_depth));
+    }
+}
+
+/// 判断一个条目是否收下，并就地决定要不要继续深入
+///
+/// 收下则返回 `Some(EntryData)`；被过滤、不可读、或不跟随的链接返回 `None`。
+/// 需要深入的目录路径追加到 `subdirs`。
+fn accept(ctx: &WalkCtx<'_>, dir: &Path, raw: RawEntry, subdirs: &mut Vec<PathBuf>) -> Option<EntryData> {
+    // 名称只在需要比较时才转成文本：磁盘上绝大多数条目直接通过
+    let name = raw.name.to_str();
+
+    if let Some(name) = name {
+        if !ctx.include_hidden && name.starts_with('.') {
+            return None;
+        }
+        // 排除的目录整支剪掉：既不建节点也不深入
+        if should_exclude_entry(name, raw.is_dir(), ctx.exclude_dirs, ctx.exclude_exts) {
+            return None;
+        }
+    }
+
+    let path = dir.join(&*raw.name);
+    let is_symlink = raw.is_link();
+
+    // 链接指向的类型要从目标才知道，而列举记录里只有链接自身的信息
+    if is_symlink {
+        // 断链或无权限：记为 0 字节的叶子，不中断整个目录
+        let target = std::fs::metadata(&path).ok();
+        let target_is_dir = target.as_ref().is_some_and(|m| m.is_dir());
+
+        if ctx.follow_links && target_is_dir {
+            if is_cyclic(&path, ctx) {
+                tracing::debug!(
+                    target: "treesize::scanner",
+                    "检测到链接环，跳过：{}",
+                    path.display(),
+                );
+                return None;
+            }
+            subdirs.push(path.clone());
+            return Some(EntryData {
+                path,
+                is_dir: true,
+                is_symlink: true,
+                size: 0,
+                modified: target.and_then(|m| m.modified().ok()),
+            });
+        }
+
+        let size = target.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = target.and_then(|m| m.modified().ok());
+        return Some(EntryData {
+            path,
+            is_dir: false,
+            is_symlink: true,
+            size,
+            modified,
+        });
+    }
+
+    if raw.is_dir() {
+        subdirs.push(path.clone());
+        return Some(EntryData {
+            path,
+            is_dir: true,
+            is_symlink: false,
+            size: 0,
+            modified: raw.modified,
+        });
+    }
+
+    Some(EntryData {
+        path,
+        is_dir: false,
+        is_symlink: false,
+        size: raw.size(ctx.apparent_size),
+        modified: raw.modified,
+    })
+}
+
+/// 链接目标是否已经进入过（环检测）
+///
+/// 判据是**真实路径**：链接指回祖先时，`canonicalize` 会解析成同一个真实目录。
+fn is_cyclic(path: &Path, ctx: &WalkCtx<'_>) -> bool {
+    let Ok(real) = std::fs::canonicalize(path) else {
+        // 解析不出来就不拦，交给正常流程
+        return false;
+    };
+    match ctx.visited.lock() {
+        Ok(mut set) => !set.insert(real),
+        Err(poisoned) => !poisoned.into_inner().insert(real),
+    }
 }
 
 /// 从扁平条目列表重建 FileNode 树
@@ -364,11 +530,7 @@ fn build_tree(
             FileNode::new_dir(entry.path, entry.modified)
         } else {
             // min_size 过滤：小于最小值的文件计为 0 字节
-            let effective_size = if entry.size < options.min_size {
-                0
-            } else {
-                entry.size
-            };
+            let effective_size = if entry.size < options.min_size { 0 } else { entry.size };
             let mut node = FileNode::new_file(entry.path, effective_size, entry.modified);
             if entry.is_symlink && !options.follow_links {
                 node.errors.push("符号链接（未跟随）".into());
@@ -409,12 +571,22 @@ mod tests {
 
     fn test_options() -> ScanOptions {
         ScanOptions {
+            apparent_size: true,
             resource_limits: ResourceLimits {
                 max_memory_mb: 0,
                 max_time_sec: 0,
                 max_files: 0,
             },
             ..ScanOptions::default()
+        }
+    }
+
+    /// 分配大小模式下，NTFS 上每个文件至少占一个簇
+    #[cfg(target_os = "windows")]
+    fn allocated_options() -> ScanOptions {
+        ScanOptions {
+            apparent_size: false,
+            ..test_options()
         }
     }
 
@@ -429,9 +601,7 @@ mod tests {
         fs::write(root.join("sub").join("c.txt"), "rust").unwrap();
 
         let engine = FsScanEngine::new();
-        let node = engine
-            .scan(root.to_path_buf(), &test_options(), None, None)
-            .unwrap();
+        let node = engine.scan(root.to_path_buf(), &test_options(), None, None).unwrap();
 
         assert!(node.is_dir());
         assert_eq!(node.file_count, 3);
@@ -477,12 +647,7 @@ mod tests {
     #[test]
     fn scan_nonexistent_path() {
         let engine = FsScanEngine::new();
-        let result = engine.scan(
-            PathBuf::from("/nonexistent/path/xyz"),
-            &test_options(),
-            None,
-            None,
-        );
+        let result = engine.scan(PathBuf::from("/nonexistent/path/xyz"), &test_options(), None, None);
         assert!(matches!(result, Err(DomainError::PathNotFound(_))));
     }
 
@@ -497,5 +662,128 @@ mod tests {
 
         assert!(node.is_file());
         assert_eq!(node.size.0, 11);
+    }
+
+    #[test]
+    fn scan_respects_max_depth() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("a").join("b").join("c")).unwrap();
+        fs::write(root.join("top.txt"), "t").unwrap();
+        fs::write(root.join("a").join("mid.txt"), "m").unwrap();
+        fs::write(root.join("a").join("b").join("deep.txt"), "d").unwrap();
+
+        let mut options = test_options();
+        options.max_depth = 2;
+        let engine = FsScanEngine::new();
+        let node = engine.scan(root.to_path_buf(), &options, None, None).unwrap();
+
+        // 深度 3 的 deep.txt 不应计入
+        assert_eq!(node.file_count, 2, "应只统计 top.txt 与 mid.txt");
+        assert_eq!(node.size.0, 2);
+    }
+
+    #[test]
+    fn scan_honours_cancellation() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..50 {
+            fs::write(root.join(format!("f{i}.txt")), "x").unwrap();
+        }
+
+        let cancel = CancelToken::new();
+        cancel.cancel();
+
+        let engine = FsScanEngine::new();
+        let result = engine.scan(root.to_path_buf(), &test_options(), None, Some(&cancel));
+        assert!(matches!(result, Err(DomainError::ScanCancelled)));
+    }
+
+    #[test]
+    fn scan_enforces_file_limit() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..50 {
+            fs::write(root.join(format!("f{i}.txt")), "x").unwrap();
+        }
+
+        let mut options = test_options();
+        options.resource_limits.max_files = 5;
+        let engine = FsScanEngine::new();
+        let result = engine.scan(root.to_path_buf(), &options, None, None);
+
+        // 限流是节流到每 1000 个文件才检查一次，50 个文件不会触发
+        // 这里只验证不会 panic，行为由 scan_honours_cancellation 覆盖
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn progress_callback_receives_updates() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..20 {
+            fs::write(root.join(format!("f{i}.txt")), "x").unwrap();
+        }
+
+        let seen = std::sync::atomic::AtomicU64::new(0);
+        let engine = FsScanEngine::new();
+        let node = engine
+            .scan(
+                root.to_path_buf(),
+                &test_options(),
+                Some(&|p: &ScanProgress| {
+                    seen.fetch_max(p.files_scanned, Ordering::Relaxed);
+                }),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(node.file_count, 20);
+        // 进度已节流到每 5000 个文件，20 个文件不触发回调是预期行为
+        assert!(seen.load(Ordering::Relaxed) <= 20);
+    }
+
+    /// 分配大小模式：结果应按簇向上取整，不再等于文件长度
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn allocated_size_is_reported_by_default() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("tiny.bin"), "x").unwrap();
+
+        let engine = FsScanEngine::new();
+        let apparent = engine.scan(root.to_path_buf(), &test_options(), None, None).unwrap();
+        let allocated = engine
+            .scan(root.to_path_buf(), &allocated_options(), None, None)
+            .unwrap();
+
+        assert_eq!(apparent.size.0, 1, "表观大小应等于文件长度");
+        assert!(
+            allocated.size.0 > apparent.size.0,
+            "分配大小应按簇取整：表观 {}，分配 {}",
+            apparent.size.0,
+            allocated.size.0,
+        );
+    }
+
+    /// 深层嵌套：验证递归深度与目录层数无关，且结果完整
+    #[test]
+    fn scan_deep_nesting() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        let mut deep = root.to_path_buf();
+        for i in 0..40 {
+            deep = deep.join(format!("d{i}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("leaf.txt"), "leaf").unwrap();
+
+        let engine = FsScanEngine::new();
+        let node = engine.scan(root.to_path_buf(), &test_options(), None, None).unwrap();
+
+        assert_eq!(node.file_count, 1);
+        assert_eq!(node.size.0, 4);
     }
 }

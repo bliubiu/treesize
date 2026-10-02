@@ -48,13 +48,7 @@ pub struct DirSizeSnapshot {
 
 impl ScanSnapshot {
     /// 创建新快照
-    pub fn new(
-        scanned_path: &PathBuf,
-        total_files: u64,
-        total_dirs: u64,
-        total_size: u64,
-        elapsed_ms: u64,
-    ) -> Self {
+    pub fn new(scanned_path: &PathBuf, total_files: u64, total_dirs: u64, total_size: u64, elapsed_ms: u64) -> Self {
         Self {
             id: None,
             scanned_path: scanned_path.to_string_lossy().to_string(),

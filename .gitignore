@@ -27,6 +27,7 @@ Desktop.ini
 
 # ── OpenCode 工作数据 ────────────────────────────────────
 .omo/
+.sisyphus/
 
 # ── CodeGraph 索引（可重新生成）───────────────────────────
 .codegraph/

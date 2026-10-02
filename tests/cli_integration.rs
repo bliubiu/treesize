@@ -106,12 +106,7 @@ fn cli_classify_output() {
     }
 
     let output = std::process::Command::new(&bin)
-        .args([
-            "--classify",
-            "--depth",
-            "1",
-            dir.path().to_str().unwrap(),
-        ])
+        .args(["--classify", "--depth", "1", dir.path().to_str().unwrap()])
         .output()
         .expect("执行失败");
 
@@ -131,13 +126,7 @@ fn cli_exclude_dir() {
     }
 
     let output = std::process::Command::new(&bin)
-        .args([
-            "--depth",
-            "5",
-            "--exclude-dir",
-            "subdir",
-            dir.path().to_str().unwrap(),
-        ])
+        .args(["--depth", "5", "--exclude-dir", "subdir", dir.path().to_str().unwrap()])
         .output()
         .expect("执行失败");
 
@@ -155,12 +144,7 @@ fn cli_no_hidden() {
     }
 
     let output = std::process::Command::new(&bin)
-        .args([
-            "--depth",
-            "5",
-            "--no-hidden",
-            dir.path().to_str().unwrap(),
-        ])
+        .args(["--depth", "5", "--no-hidden", dir.path().to_str().unwrap()])
         .output()
         .expect("执行失败");
 

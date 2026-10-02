@@ -157,19 +157,11 @@ mod tests {
         let root = build_tree();
         let report = ClassifyService::analyze(&root);
 
-        let txt = report
-            .by_extension
-            .iter()
-            .find(|e| e.extension == "txt")
-            .unwrap();
+        let txt = report.by_extension.iter().find(|e| e.extension == "txt").unwrap();
         assert_eq!(txt.file_count, 2);
         assert_eq!(txt.total_size.0, 150);
 
-        let mp4 = report
-            .by_extension
-            .iter()
-            .find(|e| e.extension == "mp4")
-            .unwrap();
+        let mp4 = report.by_extension.iter().find(|e| e.extension == "mp4").unwrap();
         assert_eq!(mp4.file_count, 1);
     }
 }

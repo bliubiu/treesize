@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::application::{ScanService, TrendService};
 use crate::domain::error::Result;
 use crate::domain::scan_engine::{ScanEngineType, ScanProgress};
-use crate::infrastructure::HistoryStorage;
+use crate::infrastructure::{detect_best_engine, HistoryStorage};
 
 #[cfg(not(target_os = "windows"))]
 use crate::infrastructure::FsScanEngine;
@@ -31,8 +31,17 @@ pub fn run(args: &CliArgs) -> Result<()> {
         return display_history(args, &path);
     }
 
+    // ── 自动选择引擎 ──
+    let engine_type = if args.engine == ScanEngineType::Auto {
+        let detected = detect_best_engine(&path);
+        tracing::info!(target: "treesize", "引擎自动选择结果：{}", detected);
+        detected
+    } else {
+        args.engine
+    };
+
     // ── 执行扫描 ──
-    let engine: Arc<dyn crate::domain::scan_engine::ScanEngine> = create_engine(args.engine);
+    let engine: Arc<dyn crate::domain::scan_engine::ScanEngine> = create_engine(engine_type);
     let service = ScanService::new(engine);
 
     // 进度回调：每 1000 个文件输出一次
@@ -79,12 +88,7 @@ pub fn run(args: &CliArgs) -> Result<()> {
 }
 
 /// 保存扫描结果到历史数据库
-fn save_to_history(
-    args: &CliArgs,
-    path: &PathBuf,
-    root: &crate::domain::FileNode,
-    elapsed_ms: u64,
-) -> Result<()> {
+fn save_to_history(args: &CliArgs, path: &PathBuf, root: &crate::domain::FileNode, elapsed_ms: u64) -> Result<()> {
     let storage = open_history(args)?;
     let (snapshot, categories, dirs) = TrendService::build_snapshot(path, root, elapsed_ms);
     let scan_id = storage
@@ -132,7 +136,10 @@ fn display_history(args: &CliArgs, path: &PathBuf) -> Result<()> {
         eprintln!();
     }
 
-    eprintln!("{:<4} {:<20} {:>12} {:>10} {:>10}", "序号", "扫描时间", "总大小", "文件数", "耗时(ms)");
+    eprintln!(
+        "{:<4} {:<20} {:>12} {:>10} {:>10}",
+        "序号", "扫描时间", "总大小", "文件数", "耗时(ms)"
+    );
     eprintln!("{}", "-".repeat(60));
     for (i, s) in snapshots.iter().enumerate() {
         eprintln!(
@@ -159,19 +166,20 @@ fn create_engine(engine_type: ScanEngineType) -> Arc<dyn crate::domain::scan_eng
 /// 根据引擎类型创建扫描引擎
 #[cfg(target_os = "windows")]
 fn create_engine(engine_type: ScanEngineType) -> Arc<dyn crate::domain::scan_engine::ScanEngine> {
+    // Auto 类型已在 run() 中预先解析，此处不会出现
     match engine_type {
+        ScanEngineType::Auto | ScanEngineType::Fs => {
+            tracing::info!("使用 FsScanEngine（文件系统遍历）");
+            Arc::new(FsScanEngine::new())
+        },
         ScanEngineType::Mft => {
             tracing::info!("使用 MFT 直接读取引擎");
             Arc::new(MftScanEngine::new())
-        }
+        },
         ScanEngineType::Usn => {
             tracing::info!("使用 USN Journal 增量引擎");
             Arc::new(UsnScanEngine::new())
-        }
-        ScanEngineType::Fs => {
-            tracing::info!("使用 FsScanEngine（文件系统遍历）");
-            Arc::new(FsScanEngine::new())
-        }
+        },
     }
 }
 

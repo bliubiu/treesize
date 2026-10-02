@@ -1,4 +1,4 @@
-use egui::{Context, FontDefinitions, FontData, FontFamily, FontId, TextStyle};
+use egui::{Context, FontData, FontDefinitions, FontFamily, FontId, TextStyle};
 
 pub fn setup_chinese_fonts(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
@@ -9,11 +9,21 @@ pub fn setup_chinese_fonts(ctx: &Context) {
     ctx.set_fonts(fonts);
 
     let mut style = (*ctx.style()).clone();
-    style.text_styles.insert(TextStyle::Body, FontId::new(18.0, FontFamily::Proportional));
-    style.text_styles.insert(TextStyle::Button, FontId::new(18.0, FontFamily::Proportional));
-    style.text_styles.insert(TextStyle::Small, FontId::new(16.0, FontFamily::Proportional));
-    style.text_styles.insert(TextStyle::Heading, FontId::new(22.0, FontFamily::Proportional));
-    style.text_styles.insert(TextStyle::Monospace, FontId::new(18.0, FontFamily::Monospace));
+    style
+        .text_styles
+        .insert(TextStyle::Body, FontId::new(18.0, FontFamily::Proportional));
+    style
+        .text_styles
+        .insert(TextStyle::Button, FontId::new(18.0, FontFamily::Proportional));
+    style
+        .text_styles
+        .insert(TextStyle::Small, FontId::new(16.0, FontFamily::Proportional));
+    style
+        .text_styles
+        .insert(TextStyle::Heading, FontId::new(22.0, FontFamily::Proportional));
+    style
+        .text_styles
+        .insert(TextStyle::Monospace, FontId::new(18.0, FontFamily::Monospace));
     ctx.set_style(style);
 }
 
@@ -22,7 +32,10 @@ fn load_monospace_font(fonts: &mut FontDefinitions) {
         ("C:\\Windows\\Fonts\\cascadia.ttf", "Cascadia Code"),
         ("C:\\Windows\\Fonts\\consola.ttf", "Consolas"),
         ("/System/Library/Fonts/Menlo.ttc", "Menlo"),
-        ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "DejaVu Sans Mono"),
+        (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "DejaVu Sans Mono",
+        ),
     ];
 
     for (path, name) in candidates.iter() {

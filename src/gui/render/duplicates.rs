@@ -13,7 +13,7 @@ pub(crate) fn render_duplicates(
     cached_duplicates: &Option<DuplicateReport>,
 ) {
     if state.node.is_none() {
-        widgets::render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「📁 选择」目录后开始");
+        widgets::render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
         return;
     }
     let Some(report) = cached_duplicates.as_ref() else {

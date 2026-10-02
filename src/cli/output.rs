@@ -8,9 +8,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use super::args::{CliArgs, OutputFormat};
-use crate::application::{
-    self, ClassifyService, DuplicateService, ReportService,
-};
+use crate::application::{self, ClassifyService, DuplicateService, ReportService};
 use crate::domain::error::{DomainError, Result};
 use crate::domain::file_node::FileNode;
 use crate::domain::scan_engine::ScanStats;
@@ -32,7 +30,7 @@ pub fn emit_reports(args: &CliArgs, root: &FileNode, stats: &ScanStats) -> Resul
             emit_html(args, root, stats)?;
             emit_icicle_svg(args, root, application::IcicleDirection::TopDown)?;
             emit_icicle_svg(args, root, application::IcicleDirection::BottomUp)?;
-        }
+        },
     }
 
     // 辅助报表输出到 stderr
@@ -108,25 +106,13 @@ fn emit_topn(args: &CliArgs, root: &FileNode) -> Result<()> {
     eprintln!("\n========== Top {} 大文件 ==========", args.top);
     let files = ReportService::top_n_files_report(root, args.top);
     for (i, e) in files.iter().enumerate() {
-        eprintln!(
-            "{:>3}. {:>10} ({:>5.2}%)  {}",
-            i + 1,
-            e.size,
-            e.percent,
-            e.path
-        );
+        eprintln!("{:>3}. {:>10} ({:>5.2}%)  {}", i + 1, e.size, e.percent, e.path);
     }
 
     eprintln!("\n========== Top {} 大目录 ==========", args.top);
     let dirs = ReportService::top_n_dirs_report(root, args.top);
     for (i, e) in dirs.iter().enumerate() {
-        eprintln!(
-            "{:>3}. {:>10} ({:>5.2}%)  {}",
-            i + 1,
-            e.size,
-            e.percent,
-            e.path
-        );
+        eprintln!("{:>3}. {:>10} ({:>5.2}%)  {}", i + 1, e.size, e.percent, e.path);
     }
     Ok(())
 }
@@ -139,10 +125,7 @@ fn emit_classify(root: &FileNode) -> Result<()> {
     eprintln!("总文件数：{}", report.total_files);
     eprintln!("总大小：{}", report.total_size);
     eprintln!("\n按大类：");
-    eprintln!(
-        "{:<10} {:>12} {:>10} {:>10}",
-        "类别", "大小", "占比", "文件数"
-    );
+    eprintln!("{:<10} {:>12} {:>10} {:>10}", "类别", "大小", "占比", "文件数");
     eprintln!("{}", "-".repeat(46));
     for c in &report.by_category {
         eprintln!(
@@ -152,10 +135,7 @@ fn emit_classify(root: &FileNode) -> Result<()> {
     }
 
     eprintln!("\n按扩展名（前 20）：");
-    eprintln!(
-        "{:<12} {:>12} {:>10} {:>10}",
-        "扩展名", "大小", "占比", "文件数"
-    );
+    eprintln!("{:<12} {:>12} {:>10} {:>10}", "扩展名", "大小", "占比", "文件数");
     eprintln!("{}", "-".repeat(48));
     for e in report.by_extension.iter().take(20) {
         eprintln!(
@@ -169,7 +149,10 @@ fn emit_classify(root: &FileNode) -> Result<()> {
 /// 重复文件扫描输出到 stderr
 fn emit_duplicates(args: &CliArgs, root: &FileNode) -> Result<()> {
     eprintln!("\n========== 重复文件扫描 ==========");
-    eprintln!("最小关注大小：{}", crate::domain::value_objects::ByteSize(args.dup_min_size));
+    eprintln!(
+        "最小关注大小：{}",
+        crate::domain::value_objects::ByteSize(args.dup_min_size)
+    );
     let report = DuplicateService::scan(root, args.dup_min_size);
 
     if report.groups.is_empty() {
@@ -221,11 +204,25 @@ fn emit_html(args: &CliArgs, root: &FileNode, stats: &ScanStats) -> Result<()> {
 
     if let Some(file) = &path {
         let mut f = std::fs::File::create(file).map_err(DomainError::Io)?;
-        ReportService::write_html(root, &mut f, stats, &args.path.clone().unwrap_or_else(|| std::path::PathBuf::from(".")), args.top, classify.as_ref())?;
+        ReportService::write_html(
+            root,
+            &mut f,
+            stats,
+            &args.path.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
+            args.top,
+            classify.as_ref(),
+        )?;
         eprintln!("HTML 报表已写入：{}", file.display());
     } else {
         let mut buf = Vec::new();
-        ReportService::write_html(root, &mut buf, stats, &args.path.clone().unwrap_or_else(|| std::path::PathBuf::from(".")), args.top, classify.as_ref())?;
+        ReportService::write_html(
+            root,
+            &mut buf,
+            stats,
+            &args.path.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
+            args.top,
+            classify.as_ref(),
+        )?;
         // stdout 输出 HTML
         let stdout = std::io::stdout();
         let mut lock = stdout.lock();

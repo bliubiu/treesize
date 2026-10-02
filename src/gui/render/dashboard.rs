@@ -22,7 +22,7 @@ pub(crate) fn render_dashboard(
     cached_classify: &Option<ClassifyReport>,
 ) {
     if state.node.is_none() {
-        widgets::render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「📁 选择」目录后开始");
+        widgets::render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
         return;
     }
     let node = state.node.as_ref().unwrap();
@@ -36,7 +36,7 @@ pub(crate) fn render_dashboard(
             let total_dirs = stats.map(|s| s.total_dirs).unwrap_or(node.dir_count);
             let elapsed = stats.map(|s| s.elapsed_ms).unwrap_or(0);
 
-            widgets::stat_card(ui, "总占用", &total_size.to_string(), theme.accent, theme);
+            widgets::stat_card_sized(ui, "总占用", &total_size.to_string(), theme.accent, theme, Some(200.0));
             widgets::stat_card(ui, "文件数", &total_files.to_string(), theme.success, theme);
             widgets::stat_card(ui, "目录数", &total_dirs.to_string(), theme.warn, theme);
             widgets::stat_card(ui, "耗时", &format!("{} ms", elapsed), theme.text_secondary, theme);
@@ -50,17 +50,19 @@ pub(crate) fn render_dashboard(
         ui.add_space(8.0);
 
         // ── 快速洞察 ──
-        render_quick_insights(ui, theme, cached_top_files, cached_top_dirs, cached_duplicates, cached_classify);
+        render_quick_insights(
+            ui,
+            theme,
+            cached_top_files,
+            cached_top_dirs,
+            cached_duplicates,
+            cached_classify,
+        );
     });
 }
 
 /// 签名元素：水平堆叠条，按大小比例展示 Top 8 子项
-fn render_signature_bar(
-    ui: &mut egui::Ui,
-    node: &FileNode,
-    theme: &ThemeColors,
-    dashboard_hover: &mut Option<usize>,
-) {
+fn render_signature_bar(ui: &mut egui::Ui, node: &FileNode, theme: &ThemeColors, dashboard_hover: &mut Option<usize>) {
     ui.heading(
         egui::RichText::new("空间分布 · Top 8")
             .color(theme.text_primary)
@@ -195,11 +197,7 @@ fn render_quick_insights(
     cached_duplicates: &Option<DuplicateReport>,
     cached_classify: &Option<ClassifyReport>,
 ) {
-    ui.heading(
-        egui::RichText::new("快速洞察")
-            .color(theme.text_primary)
-            .strong(),
-    );
+    ui.heading(egui::RichText::new("快速洞察").color(theme.text_primary).strong());
     ui.add_space(4.0);
 
     egui::Frame::none()

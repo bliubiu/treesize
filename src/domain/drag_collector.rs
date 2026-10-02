@@ -22,11 +22,7 @@ pub struct CollectedItem {
 impl CollectedItem {
     /// 创建新的收集项
     pub fn new(path: PathBuf) -> Self {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
 
         Self {
             path,

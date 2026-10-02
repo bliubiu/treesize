@@ -79,7 +79,11 @@ impl DirDiff {
     /// 变化率（百分比）
     pub fn delta_pct(&self) -> f64 {
         if self.old_size == 0 {
-            if self.new_size == 0 { 0.0 } else { 100.0 }
+            if self.new_size == 0 {
+                0.0
+            } else {
+                100.0
+            }
         } else {
             (self.delta() as f64 / self.old_size as f64) * 100.0
         }
@@ -140,10 +144,7 @@ pub struct SnapshotDiff {
 ///
 /// 对比最早和最晚快照中各子目录的大小变化，按增长量降序排列。
 /// 仅包含正增长的目录（新出现的目录视为 100% 增长）。
-pub fn compute_top_growing(
-    snapshots: &[ScanSnapshot],
-    dirs_by_scan: &[Vec<DirSizeSnapshot>],
-) -> Vec<GrowthEntry> {
+pub fn compute_top_growing(snapshots: &[ScanSnapshot], dirs_by_scan: &[Vec<DirSizeSnapshot>]) -> Vec<GrowthEntry> {
     if snapshots.len() < 2 || dirs_by_scan.len() < 2 {
         return vec![];
     }

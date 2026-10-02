@@ -11,22 +11,19 @@ use std::time::SystemTime;
 
 use crate::domain::error::{DomainError, Result};
 use crate::domain::file_node::FileNode;
-use crate::domain::scan_engine::{
-    should_exclude_entry, CancelToken, ScanEngine, ScanOptions, ScanProgress,
-};
+use crate::domain::scan_engine::{should_exclude_entry, CancelToken, ScanEngine, ScanOptions, ScanProgress};
 
 use super::ntfs_reader::{
-    close_handle, open_volume, get_volume_info, parse_mft_records,
-    path_to_volume_path, read_mft_raw, build_tree, MftFileEntry, NtfsError,
+    build_tree, get_volume_info, parse_mft_records, path_to_volume_device, read_mft_raw, MftFileEntry, NtfsError,
+    VolumeHandle,
 };
-use windows_sys::Win32::Foundation::HANDLE;
 
 /// MFT 直接读取扫描引擎
 ///
 /// # 原理
 ///
-/// 1. 打开卷设备句柄（`\\?\C:\`）
-/// 2. 通过 `FSCTL_GET_NTFS_VOLUME_DATA` 获取 MFT 位置
+/// 1. 打开卷设备句柄（`\\.\C:`，需管理员权限）
+/// 2. 读 NTFS 引导扇区取 MFT 位置；`FSCTL_GET_NTFS_VOLUME_DATA` 取有效长度
 /// 3. 从卷原始读取 MFT 数据
 /// 4. 解析每条 `FILE_RECORD_HEADER` + 属性
 /// 5. 通过 `$FILE_NAME` 属性和 `parent_reference` 重建目录树
@@ -53,21 +50,19 @@ impl ScanEngine for MftScanEngine {
         progress: Option<&(dyn Fn(&ScanProgress) + Send + Sync)>,
         cancel: Option<&CancelToken>,
     ) -> Result<FileNode> {
-        // 打开卷并获取信息
-        let volume_path = path_to_volume_path(&root);
-        let vol_path = Path::new(&volume_path);
-        let handle = open_volume(vol_path)
-            .map_err(|e| DomainError::ScanFailed(format!("打开卷失败：{e}")))?;
+        // 打开卷设备并获取信息（MFT 直读必须用 \\.\X: 卷设备路径）
+        let device = path_to_volume_device(&root);
+        let handle =
+            VolumeHandle::open(Path::new(&device)).map_err(|e| DomainError::ScanFailed(format!("打开卷失败：{e}")))?;
 
-        let result = do_mft_scan(handle, root, options, progress, cancel);
-        close_handle(handle);
-        result
+        // 句柄由 VolumeHandle 的 Drop 自动关闭
+        do_mft_scan(&handle, root, options, progress, cancel)
     }
 }
 
 /// MFT 扫描内部实现（拆分出来确保句柄在错误路径也能关闭）
 fn do_mft_scan(
-    handle: HANDLE,
+    handle: &VolumeHandle,
     root: PathBuf,
     options: &ScanOptions,
     progress: Option<&(dyn Fn(&ScanProgress) + Send + Sync)>,
@@ -75,11 +70,10 @@ fn do_mft_scan(
 ) -> Result<FileNode> {
     let start = SystemTime::now();
 
-    let volume_info = get_volume_info(handle)
-        .map_err(|e| {
-            tracing::error!(target: "treesize::mft", "获取卷信息失败：{e}");
-            DomainError::ScanFailed(format!("获取卷信息失败：{e}"))
-        })?;
+    let volume_info = get_volume_info(handle).map_err(|e| {
+        tracing::error!(target: "treesize::mft", "获取卷信息失败：{e}");
+        DomainError::ScanFailed(format!("获取卷信息失败：{e}"))
+    })?;
 
     tracing::info!(
         target: "treesize::mft",
@@ -92,12 +86,10 @@ fn do_mft_scan(
     );
 
     // 读取 MFT 原始数据
-    let max_records = 100_000_000u64.min(
-        (volume_info.mft_valid_data_length.max(0) as u64)
-            / volume_info.bytes_per_record as u64
-    );
+    let max_records =
+        100_000_000u64.min((volume_info.mft_valid_data_length.max(0) as u64) / volume_info.bytes_per_record as u64);
 
-    let raw_data = match read_mft_raw(handle, &volume_info, max_records) {
+    let mut raw_data = match read_mft_raw(handle, &volume_info, max_records) {
         Ok(data) => data,
         Err(e) => {
             let (category, detail) = classify_mft_error(&e);
@@ -106,10 +98,8 @@ fn do_mft_scan(
                 "读取 MFT 失败: [分类={}] {}: {}",
                 category, detail, volume_info.debug_lcn(),
             );
-            return Err(DomainError::ScanFailed(format!(
-                "读取 MFT 失败（{category}）：{e}"
-            )));
-        }
+            return Err(DomainError::ScanFailed(format!("读取 MFT 失败（{category}）：{e}")));
+        },
     };
 
     tracing::info!(
@@ -126,16 +116,15 @@ fn do_mft_scan(
     }
 
     // 解析 MFT 记录
-    let parsed_records = parse_mft_records(&raw_data, volume_info.bytes_per_record)
-        .map_err(|e| {
-            tracing::error!(
-                target: "treesize::mft",
-                "解析 MFT 失败: raw_len={}, bpr={}, error={e}",
-                raw_data.len(),
-                volume_info.bytes_per_record,
-            );
-            DomainError::ScanFailed(format!("解析 MFT 失败：{e}"))
-        })?;
+    let parsed_records = parse_mft_records(&mut raw_data, volume_info.bytes_per_record).map_err(|e| {
+        tracing::error!(
+            target: "treesize::mft",
+            "解析 MFT 失败: raw_len={}, bpr={}, error={e}",
+            raw_data.len(),
+            volume_info.bytes_per_record,
+        );
+        DomainError::ScanFailed(format!("解析 MFT 失败：{e}"))
+    })?;
 
     tracing::info!(
         target: "treesize::mft",
@@ -150,15 +139,14 @@ fn do_mft_scan(
     }
 
     // 构建文件树
-    let entries = build_tree(&parsed_records)
-        .map_err(|e| {
-            tracing::error!(
-                target: "treesize::mft",
-                "构建 MFT 树失败: 有效记录数={}, error={e}",
-                parsed_records.len(),
-            );
-            DomainError::ScanFailed(format!("构建 MFT 树失败：{e}"))
-        })?;
+    let entries = build_tree(&parsed_records).map_err(|e| {
+        tracing::error!(
+            target: "treesize::mft",
+            "构建 MFT 树失败: 有效记录数={}, error={e}",
+            parsed_records.len(),
+        );
+        DomainError::ScanFailed(format!("构建 MFT 树失败：{e}"))
+    })?;
 
     tracing::info!(
         target: "treesize::mft",
@@ -197,45 +185,42 @@ fn do_mft_scan(
 /// 用于区分数据损坏、物理 I/O 错误、逻辑 bug 三种根因。
 fn classify_mft_error(err: &NtfsError) -> (&'static str, String) {
     match err {
-        NtfsError::MftInvalidOffset { lcn, .. } if *lcn < 0 => {
-            ("元数据损坏", format!("MFT 起始 LCN 为负值（{}），NTFS 卷元数据异常", lcn))
-        }
+        NtfsError::MftInvalidOffset { lcn, .. } if *lcn < 0 => (
+            "元数据损坏",
+            format!("MFT 起始 LCN 为负值（{}），NTFS 卷元数据异常", lcn),
+        ),
         NtfsError::MftInvalidOffset { lcn, .. } if *lcn == 0 => {
             ("元数据损坏", "MFT 起始 LCN 为 0，NTFS 卷元数据异常".into())
-        }
-        NtfsError::MftInvalidOffset { .. } => {
-            ("逻辑错误", "LCN×cluster_size 乘法溢出导致偏移为 0，需检查类型范围".into())
-        }
+        },
+        NtfsError::MftInvalidOffset { .. } => (
+            "逻辑错误",
+            "LCN×cluster_size 乘法溢出导致偏移为 0，需检查类型范围".into(),
+        ),
         NtfsError::MftSeekError { code, .. } if *code == 55 || *code == 2 => {
             ("卷状态异常", format!("卷设备不存在或已卸载（错误码 {}）", code))
-        }
-        NtfsError::MftSeekError { offset, code, .. } if *code == 1 || *code == 87 => {
-            ("逻辑错误", format!("SetFilePointerEx 参数错误：offset={:#x}（错误码 {}）", offset, code))
-        }
-        NtfsError::MftSeekError { code, .. } => {
-            ("磁盘 I/O 错误", format!("MFT 寻址失败（错误码 {}）", code))
-        }
+        },
+        NtfsError::MftSeekError { offset, code, .. } if *code == 1 || *code == 87 => (
+            "逻辑错误",
+            format!("SetFilePointerEx 参数错误：offset={:#x}（错误码 {}）", offset, code),
+        ),
+        NtfsError::MftSeekError { code, .. } => ("磁盘 I/O 错误", format!("MFT 寻址失败（错误码 {}）", code)),
         NtfsError::MftReadError { code, .. } if *code == 23 => {
             ("物理损坏", "磁盘 CRC 校验失败，建议检查磁盘健康状态".into())
-        }
-        NtfsError::MftReadError { code, .. } if *code == 27 => {
-            ("物理损坏", "磁盘扇区未找到，存在坏道".into())
-        }
-        NtfsError::MftReadError { code, .. } if *code == 38 => {
-            ("元数据损坏", "读取到文件尾，MFT valid_data_length 与实际数据不匹配".into())
-        }
+        },
+        NtfsError::MftReadError { code, .. } if *code == 27 => ("物理损坏", "磁盘扇区未找到，存在坏道".into()),
+        NtfsError::MftReadError { code, .. } if *code == 38 => (
+            "元数据损坏",
+            "读取到文件尾，MFT valid_data_length 与实际数据不匹配".into(),
+        ),
         NtfsError::MftReadError { code, .. } if *code == 111 => {
             ("物理损坏", "磁盘 I/O 设备错误，建议检查磁盘连接".into())
-        }
-        NtfsError::MftReadError { code, .. } if *code == 55 => {
-            ("卷状态异常", "卷已被卸载".into())
-        }
-        NtfsError::MftReadError { expected, code, .. } => {
-            ("磁盘 I/O 错误", format!("MFT 数据读取失败：期望 {} 字节（错误码 {}）", expected, code))
-        }
-        _ => {
-            ("未知错误", format!("{}", err))
-        }
+        },
+        NtfsError::MftReadError { code, .. } if *code == 55 => ("卷状态异常", "卷已被卸载".into()),
+        NtfsError::MftReadError { expected, code, .. } => (
+            "磁盘 I/O 错误",
+            format!("MFT 数据读取失败：期望 {} 字节（错误码 {}）", expected, code),
+        ),
+        _ => ("未知错误", format!("{}", err)),
     }
 }
 
@@ -252,10 +237,7 @@ fn rebuild_tree(
     // 步骤 1：构建 parent → children 索引
     let mut parent_index: HashMap<u64, Vec<MftFileEntry>> = HashMap::new();
     for entry in entries {
-        parent_index
-            .entry(entry.parent_record)
-            .or_default()
-            .push(entry);
+        parent_index.entry(entry.parent_record).or_default().push(entry);
     }
 
     // 步骤 2：从根开始递归构建树
@@ -297,11 +279,7 @@ fn rebuild_tree(
                     child_nodes.push(child);
                 } else {
                     // 文件节点
-                    let effective_size = if entry.size < min_size {
-                        0
-                    } else {
-                        entry.size
-                    };
+                    let effective_size = if entry.size < min_size { 0 } else { entry.size };
                     let child = FileNode::new_file(child_path, effective_size, None);
                     child_nodes.push(child);
                 }

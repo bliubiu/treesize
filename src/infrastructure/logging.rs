@@ -76,10 +76,7 @@ impl DailyLogRotator {
         let today = Local::now().format("%Y%m%d").to_string();
         if self.current_date != today {
             let path = self.log_dir.join(format!("treesize-{today}.log"));
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)?;
+            let file = OpenOptions::new().create(true).append(true).open(&path)?;
             self.file = Some(file);
             self.current_date = today;
         }
@@ -120,12 +117,7 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
     N: for<'a> FormatFields<'a> + 'static,
 {
-    fn format_event(
-        &self,
-        ctx: &FmtContext<'_, S, N>,
-        mut writer: Writer<'_>,
-        event: &Event<'_>,
-    ) -> std::fmt::Result {
+    fn format_event(&self, ctx: &FmtContext<'_, S, N>, mut writer: Writer<'_>, event: &Event<'_>) -> std::fmt::Result {
         let meta = event.metadata();
         let now = Local::now();
 
@@ -170,8 +162,7 @@ where
 /// 同时输出到文件（按日期轮转）和终端。
 /// 自动注册 panic hook 将 panic 信息记录到日志。
 pub fn init(log_dir: &Path, level: LogLevel) -> Result<LogGuard, String> {
-    std::fs::create_dir_all(log_dir)
-        .map_err(|e| format!("创建日志目录失败：{e}"))?;
+    std::fs::create_dir_all(log_dir).map_err(|e| format!("创建日志目录失败：{e}"))?;
 
     // ── 清理过期日志（32 天前） ──
     cleanup_old_logs(log_dir);
@@ -181,16 +172,13 @@ pub fn init(log_dir: &Path, level: LogLevel) -> Result<LogGuard, String> {
     let (non_blocking_file, file_guard) = tracing_appender::non_blocking(file_writer);
 
     // ── 过滤器 ──
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level.as_filter()));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level.as_filter()));
 
     // ── 自定义格式 ──
     let treesize_format = TreesizeFormat;
 
     // ── stderr 层（终端输出到 stderr，避免污染 stdout） ──
-    let stderr_layer = fmt::layer()
-        .event_format(treesize_format)
-        .with_writer(io::stderr);
+    let stderr_layer = fmt::layer().event_format(treesize_format).with_writer(io::stderr);
 
     // ── 文件层 ──
     let file_layer = fmt::layer()
@@ -215,12 +203,7 @@ pub fn init(log_dir: &Path, level: LogLevel) -> Result<LogGuard, String> {
             .payload()
             .downcast_ref::<&str>()
             .map(|s| s.to_string())
-            .or_else(|| {
-                panic_info
-                    .payload()
-                    .downcast_ref::<String>()
-                    .map(|s| s.to_string())
-            })
+            .or_else(|| panic_info.payload().downcast_ref::<String>().map(|s| s.to_string()))
             .unwrap_or_else(|| "未知 panic 载荷".to_string());
 
         if let Some(location) = panic_info.location() {
@@ -260,10 +243,7 @@ fn cleanup_old_logs(log_dir: &Path) {
             };
 
             // 只匹配 treesize-YYYYMMDD.log
-            if let Some(date_str) = file_name
-                .strip_prefix("treesize-")
-                .and_then(|s| s.strip_suffix(".log"))
-            {
+            if let Some(date_str) = file_name.strip_prefix("treesize-").and_then(|s| s.strip_suffix(".log")) {
                 if date_str.len() == 8 && date_str.chars().all(|c| c.is_ascii_digit()) {
                     if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y%m%d") {
                         let days_old = (today - date).num_days();
@@ -392,10 +372,7 @@ mod tests {
             "33 天前的日志应被清理"
         );
         // 当天文件应保留
-        assert!(
-            log_dir.join(format!("treesize-{today}.log")).exists(),
-            "当天日志应保留"
-        );
+        assert!(log_dir.join(format!("treesize-{today}.log")).exists(), "当天日志应保留");
     }
 
     #[test]
@@ -480,10 +457,7 @@ mod tests {
 
         cleanup_old_logs(log_dir);
 
-        assert!(
-            !log_dir.join(format!("treesize-{old}.log")).exists(),
-            "33 天前应被删除"
-        );
+        assert!(!log_dir.join(format!("treesize-{old}.log")).exists(), "33 天前应被删除");
     }
 
     // ── LogGuard ───────────────────────────────────────────────────────

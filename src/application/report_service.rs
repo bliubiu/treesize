@@ -42,12 +42,7 @@ impl ReportService {
     ///
     /// `max_depth` 为最大显示深度（0 = 仅根，usize::MAX = 全部）。
     /// `min_percent` 为显示阈值，占比小于此值的节点折叠（0.0 = 显示全部）。
-    pub fn render_tree<W: Write>(
-        root: &FileNode,
-        writer: &mut W,
-        max_depth: usize,
-        min_percent: f64,
-    ) -> Result<()> {
+    pub fn render_tree<W: Write>(root: &FileNode, writer: &mut W, max_depth: usize, min_percent: f64) -> Result<()> {
         Self::render_tree_inner(root, writer, 0, max_depth, min_percent, root.size)?;
         Ok(())
     }
@@ -75,11 +70,7 @@ impl ReportService {
         let kind = if node.is_dir() { "\u{1f4c1}" } else { "\u{1f4c4}" };
         let line = format!(
             "{indent}{kind} {} [{} | {:.2}% | {} \u{4e2a}\u{6587}\u{4ef6}/{} \u{4e2a}\u{76ee}\u{5f55}]\n",
-            node.name,
-            node.size,
-            percent,
-            node.file_count,
-            node.dir_count,
+            node.name, node.size, percent, node.file_count, node.dir_count,
         );
         writer.write_all(line.as_bytes()).map_err(DomainError::Io)?;
 
@@ -213,8 +204,7 @@ impl ReportService {
             .collect();
         dirs.sort_by(|a, b| b.size.cmp(&a.size));
         dirs.truncate(n);
-        dirs
-            .into_iter()
+        dirs.into_iter()
             .map(|node| {
                 let percent = if total > 0 {
                     (node.size.0 as f64 / total as f64) * 100.0
@@ -253,9 +243,9 @@ impl ReportService {
         let top_files = Self::top_n_files_report(root, top_n);
         let top_dirs = Self::top_n_dirs_report(root, top_n);
 
-    let tree_val = serde_json::to_value(root).map_err(|e| ser_err(e))?;
-    let files_val = serde_json::to_value(&top_files).map_err(|e| ser_err(e))?;
-    let dirs_val = serde_json::to_value(&top_dirs).map_err(|e| ser_err(e))?;
+        let tree_val = serde_json::to_value(root).map_err(|e| ser_err(e))?;
+        let files_val = serde_json::to_value(&top_files).map_err(|e| ser_err(e))?;
+        let dirs_val = serde_json::to_value(&top_dirs).map_err(|e| ser_err(e))?;
         let classify_val = classify.and_then(|c| serde_json::to_value(c).ok());
 
         write_html_tags(writer)?;
@@ -276,55 +266,94 @@ fn write_html_tags<W: Write>(w: &mut W) -> Result<()> {
     // Write CSS as a separate write_all call to avoid brace conflicts with write!()
     let doctype = b"<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1.0\">\n<title>treesize - ";
     w.write_all(doctype).map_err(DomainError::Io)?;
-    write!(w, "\u{78c1}\u{76d8}\u{5360}\u{7528}\u{5206}\u{6790}\u{62a5}\u{544a}</title>\n<style>\n").map_err(DomainError::Io)?;
+    write!(
+        w,
+        "\u{78c1}\u{76d8}\u{5360}\u{7528}\u{5206}\u{6790}\u{62a5}\u{544a}</title>\n<style>\n"
+    )
+    .map_err(DomainError::Io)?;
     // CSS as a raw byte slice — no write!() format processing means {} are literal
     w.write_all(b":root{--bg:#0f1117;--surface:#1a1d28;--surface-2:#242738;--border:#2e3148;--text:#e1e4ed;--text-secondary:#8b8fa8;--accent:#6c8cff;--orange:#fb923c;--green:#4ade80;--purple:#a78bfa;--teal:#2dd4bf;--pink:#f472b6;--red:#f87171;--font-mono:ui-monospace,'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans SC',Roboto,sans-serif}").map_err(DomainError::Io)?;
-    w.write_all(b"*{margin:0;padding:0;box-sizing:border-box}").map_err(DomainError::Io)?;
-    w.write_all(b"body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6}").map_err(DomainError::Io)?;
-    w.write_all(b".container{max-width:1200px;margin:0 auto;padding:24px}").map_err(DomainError::Io)?;
+    w.write_all(b"*{margin:0;padding:0;box-sizing:border-box}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b"body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".container{max-width:1200px;margin:0 auto;padding:24px}")
+        .map_err(DomainError::Io)?;
     w.write_all(b".header{background:linear-gradient(135deg,var(--surface),var(--surface-2));border:1px solid var(--border);border-radius:12px;padding:32px;margin-bottom:24px}").map_err(DomainError::Io)?;
     w.write_all(b".header h1{font-size:24px;font-weight:700;margin-bottom:8px;background:linear-gradient(90deg,var(--accent),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}").map_err(DomainError::Io)?;
-    w.write_all(b".header .meta{color:var(--text-secondary);font-size:14px}").map_err(DomainError::Io)?;
-    w.write_all(b".header .meta span{display:inline-block;margin-right:20px}").map_err(DomainError::Io)?;
-    w.write_all(b".stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}").map_err(DomainError::Io)?;
+    w.write_all(b".header .meta{color:var(--text-secondary);font-size:14px}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".header .meta span{display:inline-block;margin-right:20px}")
+        .map_err(DomainError::Io)?;
+    w.write_all(
+        b".stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}",
+    )
+    .map_err(DomainError::Io)?;
     w.write_all(b".stat-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;text-align:center}").map_err(DomainError::Io)?;
-    w.write_all(b".stat-card .value{font-size:28px;font-weight:700;font-family:var(--font-mono);color:var(--accent)}").map_err(DomainError::Io)?;
-    w.write_all(b".stat-card .label{font-size:13px;color:var(--text-secondary);margin-top:4px}").map_err(DomainError::Io)?;
+    w.write_all(b".stat-card .value{font-size:28px;font-weight:700;font-family:var(--font-mono);color:var(--accent)}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".stat-card .label{font-size:13px;color:var(--text-secondary);margin-top:4px}")
+        .map_err(DomainError::Io)?;
     w.write_all(b".section{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px}").map_err(DomainError::Io)?;
     w.write_all(b".section h2{font-size:18px;font-weight:600;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--border)}").map_err(DomainError::Io)?;
     w.write_all(b".table-wrap{overflow-x:auto}").map_err(DomainError::Io)?;
-    w.write_all(b"table{width:100%;border-collapse:collapse;font-size:14px}").map_err(DomainError::Io)?;
-    w.write_all(b"th,td{padding:8px 12px;text-align:right;white-space:nowrap}").map_err(DomainError::Io)?;
+    w.write_all(b"table{width:100%;border-collapse:collapse;font-size:14px}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b"th,td{padding:8px 12px;text-align:right;white-space:nowrap}")
+        .map_err(DomainError::Io)?;
     w.write_all(b"th{color:var(--text-secondary);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);cursor:pointer;user-select:none}").map_err(DomainError::Io)?;
-    w.write_all(b"th:first-child,td:first-child{text-align:left}").map_err(DomainError::Io)?;
-    w.write_all(b"td.name-cell{max-width:400px;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}").map_err(DomainError::Io)?;
-    w.write_all(b"tr:hover td{background:var(--surface-2)}").map_err(DomainError::Io)?;
+    w.write_all(b"th:first-child,td:first-child{text-align:left}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b"td.name-cell{max-width:400px;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b"tr:hover td{background:var(--surface-2)}")
+        .map_err(DomainError::Io)?;
     w.write_all(b".bar{display:inline-block;height:6px;border-radius:3px;background:var(--accent);min-width:2px;vertical-align:middle}").map_err(DomainError::Io)?;
-    w.write_all(b".bar-wrap{width:80px;display:inline-block;background:var(--border);border-radius:3px;height:6px}").map_err(DomainError::Io)?;
-    w.write_all(b".tree{font-family:var(--font-mono);font-size:13px;line-height:1.8}").map_err(DomainError::Io)?;
-    w.write_all(b".tree ul{list-style:none;padding-left:20px}").map_err(DomainError::Io)?;
+    w.write_all(b".bar-wrap{width:80px;display:inline-block;background:var(--border);border-radius:3px;height:6px}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".tree{font-family:var(--font-mono);font-size:13px;line-height:1.8}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".tree ul{list-style:none;padding-left:20px}")
+        .map_err(DomainError::Io)?;
     w.write_all(b".tree li{position:relative}").map_err(DomainError::Io)?;
     w.write_all(b".tree .toggle{cursor:pointer;display:inline-block;width:16px;text-align:center;color:var(--text-secondary);user-select:none}").map_err(DomainError::Io)?;
-    w.write_all(b".tree .toggle:hover{color:var(--accent)}").map_err(DomainError::Io)?;
+    w.write_all(b".tree .toggle:hover{color:var(--accent)}")
+        .map_err(DomainError::Io)?;
     w.write_all(b".tree .node-label{cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:2px 4px;border-radius:4px}").map_err(DomainError::Io)?;
-    w.write_all(b".tree .node-label:hover{background:var(--surface-2)}").map_err(DomainError::Io)?;
-    w.write_all(b".tree .node-icon{width:16px;text-align:center}").map_err(DomainError::Io)?;
-    w.write_all(b".tree .node-icon.folder{color:var(--orange)}").map_err(DomainError::Io)?;
-    w.write_all(b".tree .node-icon.file{color:var(--accent)}").map_err(DomainError::Io)?;
-    w.write_all(b".tree .node-size{color:var(--text-secondary);margin-left:8px}").map_err(DomainError::Io)?;
-    w.write_all(b".tree .node-pct{color:var(--text-secondary);font-size:11px;margin-left:4px}").map_err(DomainError::Io)?;
-    w.write_all(b".tree .tree-bar{display:inline-block;height:4px;border-radius:2px;margin-left:6px;vertical-align:middle}").map_err(DomainError::Io)?;
+    w.write_all(b".tree .node-label:hover{background:var(--surface-2)}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".tree .node-icon{width:16px;text-align:center}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".tree .node-icon.folder{color:var(--orange)}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".tree .node-icon.file{color:var(--accent)}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".tree .node-size{color:var(--text-secondary);margin-left:8px}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".tree .node-pct{color:var(--text-secondary);font-size:11px;margin-left:4px}")
+        .map_err(DomainError::Io)?;
+    w.write_all(
+        b".tree .tree-bar{display:inline-block;height:4px;border-radius:2px;margin-left:6px;vertical-align:middle}",
+    )
+    .map_err(DomainError::Io)?;
     w.write_all(b".collapsed>ul{display:none}").map_err(DomainError::Io)?;
     w.write_all(b".cat-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}").map_err(DomainError::Io)?;
-    w.write_all(b".classify-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}").map_err(DomainError::Io)?;
-    w.write_all(b".tabs{display:flex;gap:4px;margin-bottom:16px;flex-wrap:wrap}").map_err(DomainError::Io)?;
+    w.write_all(b".classify-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".tabs{display:flex;gap:4px;margin-bottom:16px;flex-wrap:wrap}")
+        .map_err(DomainError::Io)?;
     w.write_all(b".tab{padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;color:var(--text-secondary);border:1px solid transparent;background:transparent;transition:all .15s}").map_err(DomainError::Io)?;
-    w.write_all(b".tab:hover{color:var(--text);background:var(--surface-2)}").map_err(DomainError::Io)?;
-    w.write_all(b".tab.active{color:var(--accent);border-color:var(--accent);background:rgba(108,140,255,.1)}").map_err(DomainError::Io)?;
+    w.write_all(b".tab:hover{color:var(--text);background:var(--surface-2)}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".tab.active{color:var(--accent);border-color:var(--accent);background:rgba(108,140,255,.1)}")
+        .map_err(DomainError::Io)?;
     w.write_all(b".tab-content{display:none}").map_err(DomainError::Io)?;
-    w.write_all(b".tab-content.active{display:block}").map_err(DomainError::Io)?;
-    w.write_all(b".footer{text-align:center;color:var(--text-secondary);font-size:12px;padding:24px}").map_err(DomainError::Io)?;
-    w.write_all(b"</style>\n</head>\n<body>\n<div class=\"container\">\n").map_err(DomainError::Io)?;
+    w.write_all(b".tab-content.active{display:block}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b".footer{text-align:center;color:var(--text-secondary);font-size:12px;padding:24px}")
+        .map_err(DomainError::Io)?;
+    w.write_all(b"</style>\n</head>\n<body>\n<div class=\"container\">\n")
+        .map_err(DomainError::Io)?;
     Ok(())
 }
 
@@ -340,7 +369,11 @@ fn write_html_header<W: Write>(w: &mut W, path: &str, now: &str, stats: &ScanSta
     write!(w, "{:.1}", secs).map_err(DomainError::Io)?;
     write!(w, " \u{79d2}</span>\n    </div>\n  </div>\n").map_err(DomainError::Io)?;
 
-    write!(w, "  <div class=\"stats\">\n    <div class=\"stat-card\"><div class=\"value\">").map_err(DomainError::Io)?;
+    write!(
+        w,
+        "  <div class=\"stats\">\n    <div class=\"stat-card\"><div class=\"value\">"
+    )
+    .map_err(DomainError::Io)?;
     write_html_text(w, &hr)?;
     write!(w, "</div><div class=\"label\">\u{603b}\u{5927}\u{5c0f}</div></div>\n    <div class=\"stat-card\"><div class=\"value\">").map_err(DomainError::Io)?;
     write!(w, "{}", stats.total_files).map_err(DomainError::Io)?;
@@ -348,7 +381,11 @@ fn write_html_header<W: Write>(w: &mut W, path: &str, now: &str, stats: &ScanSta
     write!(w, "{}", stats.total_dirs).map_err(DomainError::Io)?;
     write!(w, "</div><div class=\"label\">\u{76ee}\u{5f55}\u{6570}</div></div>\n    <div class=\"stat-card\"><div class=\"value\" style=\"color:var(--orange)\">").map_err(DomainError::Io)?;
     write!(w, "{}", stats.error_count).map_err(DomainError::Io)?;
-    write!(w, "</div><div class=\"label\">\u{626b}\u{63cf}\u{9519}\u{8bef}</div></div>\n  </div>\n").map_err(DomainError::Io)?;
+    write!(
+        w,
+        "</div><div class=\"label\">\u{626b}\u{63cf}\u{9519}\u{8bef}</div></div>\n  </div>\n"
+    )
+    .map_err(DomainError::Io)?;
     Ok(())
 }
 
@@ -357,11 +394,13 @@ fn write_html_body<W: Write>(w: &mut W, top_n: usize) -> Result<()> {
 
     w.write_all(b"  <div class=\"section tab-content active\" id=\"tab-tree\">\n    <h2>\xf0\x9f\x8c\xb3 \xe7\x9b\xae\xe5\xbd\x95\xe6\xa0\x91</h2>\n    <div class=\"tree\" id=\"tree-root\"></div>\n  </div>\n").map_err(DomainError::Io)?;
 
-    w.write_all(b"  <div class=\"section tab-content\" id=\"tab-top-files\">\n    <h2>\xf0\x9f\x93\x84 Top ").map_err(DomainError::Io)?;
+    w.write_all(b"  <div class=\"section tab-content\" id=\"tab-top-files\">\n    <h2>\xf0\x9f\x93\x84 Top ")
+        .map_err(DomainError::Io)?;
     write!(w, "{}", top_n).map_err(DomainError::Io)?;
     w.write_all(b" \xe5\xa4\xa7\xe6\x96\x87\xe4\xbb\xb6</h2>\n    <div class=\"table-wrap\">\n      <table><thead><tr>\n        <th data-sort=\"name\">\xe6\x96\x87\xe4\xbb\xb6\xe5\x90\x8d</th>\n        <th data-sort=\"size\" data-dir=\"desc\">\xe5\xa4\xa7\xe5\xb0\x8f</th>\n        <th data-sort=\"percent\" data-dir=\"desc\">\xe5\x8d\xa0\xe6\xaf\x94</th>\n        <th data-sort=\"category\">\xe7\xb1\xbb\xe5\x88\xab</th>\n        <th data-sort=\"extension\">\xe6\x89\xa9\xe5\xb1\x95\xe5\x90\x8d</th>\n        <th data-sort=\"modified\">\xe4\xbf\xae\xe6\x94\xb9\xe6\x97\xb6\xe9\x97\xb4</th>\n      </tr></thead>\n      <tbody id=\"top-files-body\"></tbody></table>\n    </div>\n  </div>\n").map_err(DomainError::Io)?;
 
-    w.write_all(b"  <div class=\"section tab-content\" id=\"tab-top-dirs\">\n    <h2>\xf0\x9f\x93\x81 Top ").map_err(DomainError::Io)?;
+    w.write_all(b"  <div class=\"section tab-content\" id=\"tab-top-dirs\">\n    <h2>\xf0\x9f\x93\x81 Top ")
+        .map_err(DomainError::Io)?;
     write!(w, "{}", top_n).map_err(DomainError::Io)?;
     w.write_all(b" \xe5\xa4\xa7\xe7\x9b\xae\xe5\xbd\x95</h2>\n    <div class=\"table-wrap\">\n      <table><thead><tr>\n        <th data-sort=\"name\">\xe7\x9b\xae\xe5\xbd\x95\xe5\x90\x8d</th>\n        <th data-sort=\"size\" data-dir=\"desc\">\xe5\xa4\xa7\xe5\xb0\x8f</th>\n        <th data-sort=\"percent\" data-dir=\"desc\">\xe5\x8d\xa0\xe6\xaf\x94</th>\n      </tr></thead>\n      <tbody id=\"top-dirs-body\"></tbody></table>\n    </div>\n  </div>\n").map_err(DomainError::Io)?;
 
@@ -413,7 +452,7 @@ fn write_html_js<W: Write>(
     serde_json::to_writer(&mut *w, top_dirs).map_err(|e| ser_err(e))?;
     write!(w, ";var CLASSIFY=").map_err(DomainError::Io)?;
     match classify {
-            Some(v) => serde_json::to_writer(&mut *w, v).map_err(|e| ser_err(e))?,
+        Some(v) => serde_json::to_writer(&mut *w, v).map_err(|e| ser_err(e))?,
         None => write!(w, "null").map_err(DomainError::Io)?,
     }
     write!(w, ";var TS=").map_err(DomainError::Io)?;

@@ -3,9 +3,11 @@
 use egui::{Color32, Pos2, Rect, Vec2};
 
 use crate::application::models::{SnapshotDiff, TrendReport};
+use crate::application::SnapshotDiffService;
+use crate::domain::value_objects::ByteSize;
 use crate::gui::theme::ThemeColors;
 use crate::gui::widgets;
-use crate::domain::value_objects::ByteSize;
+use crate::infrastructure::history_storage::HistoryStorage;
 
 /// 渲染快照对比结果（只读，不修改 app 状态）
 pub(crate) fn render_diff_result(ui: &mut egui::Ui, diff: &SnapshotDiff, theme: &ThemeColors) {
@@ -44,7 +46,13 @@ pub(crate) fn render_diff_result(ui: &mut egui::Ui, diff: &SnapshotDiff, theme: 
         };
 
         widgets::stat_card(ui, "文件数变化", &format!("{:+}", diff.file_delta), file_color, theme);
-        widgets::stat_card(ui, "目录数变化", &format!("{:+}", diff.dir_delta), theme.text_secondary, theme);
+        widgets::stat_card(
+            ui,
+            "目录数变化",
+            &format!("{:+}", diff.dir_delta),
+            theme.text_secondary,
+            theme,
+        );
     });
 
     ui.add_space(8.0);
@@ -138,11 +146,7 @@ pub(crate) fn render_diff_result(ui: &mut egui::Ui, diff: &SnapshotDiff, theme: 
 
     // 分类变化
     if !diff.category_diffs.is_empty() {
-        ui.label(
-            egui::RichText::new("文件分类变化")
-                .color(theme.text_primary)
-                .strong(),
-        );
+        ui.label(egui::RichText::new("文件分类变化").color(theme.text_primary).strong());
         ui.add_space(4.0);
 
         egui::Grid::new("cat_diff_grid")
@@ -275,10 +279,7 @@ pub(crate) fn trend_line_chart(ui: &mut egui::Ui, trend: &TrendReport, theme: &T
         }
 
         for i in 0..points.len() - 1 {
-            painter.line_segment(
-                [points[i], points[i + 1]],
-                egui::Stroke::new(2.0, theme.accent),
-            );
+            painter.line_segment([points[i], points[i + 1]], egui::Stroke::new(2.0, theme.accent));
         }
 
         for (i, &p) in points.iter().enumerate() {
@@ -299,4 +300,134 @@ pub(crate) fn trend_line_chart(ui: &mut egui::Ui, trend: &TrendReport, theme: &T
         egui::FontId::proportional(12.0),
         theme.text_primary,
     );
+}
+
+/// 完整的趋势面板：统计卡片 + 趋势图 + 快照对比
+pub(crate) fn render_trend_panel(ui: &mut egui::Ui, trend: &TrendReport, theme: &ThemeColors) {
+    if trend.size_trend.is_empty() {
+        widgets::render_empty_state(ui, "暂无扫描历史", "还没有该路径的历史记录，完成一次扫描后自动生成");
+        return;
+    }
+
+    // 统计卡片
+    ui.horizontal(|ui| {
+        let first = &trend.size_trend[0];
+        let last = trend.size_trend.last().unwrap();
+        let growth = last.total_size.saturating_sub(first.total_size);
+        let pct = if first.total_size > 0 {
+            (growth as f64 / first.total_size as f64) * 100.0
+        } else {
+            0.0
+        };
+        widgets::stat_card(ui, "扫描次数", &trend.snapshots.len().to_string(), theme.accent, theme);
+        widgets::stat_card(
+            ui,
+            "首次",
+            &first.date.format("%Y-%m-%d").to_string(),
+            theme.text_secondary,
+            theme,
+        );
+        widgets::stat_card(
+            ui,
+            "最近",
+            &last.date.format("%Y-%m-%d").to_string(),
+            theme.text_secondary,
+            theme,
+        );
+        widgets::stat_card(
+            ui,
+            "增长",
+            &format!("{} ({:.1}%)", ByteSize(growth), pct),
+            theme.warn,
+            theme,
+        );
+    });
+
+    ui.add_space(8.0);
+    trend_line_chart(ui, trend, theme);
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+}
+
+/// 快照对比选择面板
+pub(crate) fn render_snapshot_diff_panel(
+    ui: &mut egui::Ui,
+    trend: &TrendReport,
+    theme: &ThemeColors,
+    diff_old_selected: &mut Option<i64>,
+    diff_new_selected: &mut Option<i64>,
+    cached_diff: &mut Option<SnapshotDiff>,
+    history_storage: &Option<HistoryStorage>,
+) {
+    ui.heading(egui::RichText::new("快照对比").color(theme.text_primary).strong());
+    ui.add_space(4.0);
+
+    if trend.snapshots.len() < 2 {
+        ui.label(egui::RichText::new("需要至少 2 次扫描记录才能进行对比").color(theme.text_secondary));
+        return;
+    }
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("旧快照：").color(theme.text_primary));
+        egui::ComboBox::from_id_source("diff_old_combo")
+            .selected_text(
+                diff_old_selected
+                    .and_then(|id| trend.snapshots.iter().find(|s| s.id == Some(id)))
+                    .map(|s| s.scanned_at.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "选择...".to_string()),
+            )
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                for snap in &trend.snapshots {
+                    if let Some(id) = snap.id {
+                        let label = snap.scanned_at.format("%Y-%m-%d %H:%M").to_string();
+                        ui.selectable_value(diff_old_selected, Some(id), label);
+                    }
+                }
+            });
+
+        ui.add_space(16.0);
+
+        ui.label(egui::RichText::new("新快照：").color(theme.text_primary));
+        egui::ComboBox::from_id_source("diff_new_combo")
+            .selected_text(
+                diff_new_selected
+                    .and_then(|id| trend.snapshots.iter().find(|s| s.id == Some(id)))
+                    .map(|s| s.scanned_at.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "选择...".to_string()),
+            )
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                for snap in &trend.snapshots {
+                    if let Some(id) = snap.id {
+                        let label = snap.scanned_at.format("%Y-%m-%d %H:%M").to_string();
+                        ui.selectable_value(diff_new_selected, Some(id), label);
+                    }
+                }
+            });
+
+        ui.add_space(16.0);
+
+        if ui.button("对比").clicked() {
+            if let (Some(old_id), Some(new_id)) = (*diff_old_selected, *diff_new_selected) {
+                if let Some(ref storage) = history_storage {
+                    match storage.get_diff_data(old_id, new_id) {
+                        Ok((old, new, old_cats, new_cats, old_dirs, new_dirs)) => {
+                            let diff =
+                                SnapshotDiffService::compare(&old, &new, &old_cats, &new_cats, &old_dirs, &new_dirs);
+                            *cached_diff = Some(diff);
+                        },
+                        Err(e) => {
+                            tracing::error!("快照对比失败：{e}");
+                        },
+                    }
+                }
+            }
+        }
+    });
+
+    ui.add_space(8.0);
+
+    if let Some(ref diff) = *cached_diff {
+        render_diff_result(ui, diff, theme);
+    }
 }

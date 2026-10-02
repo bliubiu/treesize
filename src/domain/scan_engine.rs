@@ -16,7 +16,9 @@ use super::value_objects::ByteSize;
 /// 扫描引擎类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScanEngineType {
-    /// jwalk 并行文件系统遍历（跨平台，默认）
+    /// 自动选择：NTFS 卷使用 MFT，非 NTFS 使用 Fs
+    Auto,
+    /// Fs 引擎：目录枚举并行遍历（跨平台）
     Fs,
     /// MFT 直接读取（仅 Windows NTFS）
     #[cfg(target_os = "windows")]
@@ -28,7 +30,7 @@ pub enum ScanEngineType {
 
 impl Default for ScanEngineType {
     fn default() -> Self {
-        Self::Fs
+        Self::Auto
     }
 }
 
@@ -57,6 +59,7 @@ pub fn should_exclude_entry(name: &str, is_dir: bool, exclude_dirs: &[String], e
 impl std::fmt::Display for ScanEngineType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Auto => write!(f, "auto"),
             Self::Fs => write!(f, "fs"),
             #[cfg(target_os = "windows")]
             Self::Mft => write!(f, "mft"),
@@ -70,13 +73,17 @@ impl std::str::FromStr for ScanEngineType {
     type Err = String;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
             "fs" => Ok(Self::Fs),
             #[cfg(target_os = "windows")]
             "mft" => Ok(Self::Mft),
             #[cfg(target_os = "windows")]
             "usn" => Ok(Self::Usn),
-            _ => Err(format!("未知引擎类型：{}（可用：fs{}）", s,
-                if cfg!(target_os = "windows") { ", mft, usn" } else { "" })),
+            _ => Err(format!(
+                "未知引擎类型：{}（可用：auto, fs{}）",
+                s,
+                if cfg!(target_os = "windows") { ", mft, usn" } else { "" }
+            )),
         }
     }
 }
@@ -100,6 +107,12 @@ pub struct ScanOptions {
     pub exclude_exts: Vec<String>,
     /// 资源限制配置
     pub resource_limits: ResourceLimits,
+    /// 大小口径：true = 表观大小（文件逻辑长度），false = 分配大小（卷实际占用）
+    ///
+    /// 默认 false，与 TreeSize / WizTree / `du` 的口径一致：
+    /// 分配大小才反映"这个文件占了多少盘"，表观大小会把 3 字节文件算成 3 字节，
+    /// 而 NTFS 上它实际占满一个簇。稀疏文件、压缩文件的差距尤其大。
+    pub apparent_size: bool,
     /// 是否启用增量扫描
     pub incremental: bool,
     /// 增量扫描的基准时间（只扫描此时间之后修改的文件）
@@ -122,7 +135,7 @@ impl Default for ResourceLimits {
         Self {
             // 0 表示不限制（系统级内存监控精度不足，不适合做进程级限制）
             max_memory_mb: 0,
-            max_time_sec: 300,    // 默认限制 5 分钟
+            max_time_sec: 300,     // 默认限制 5 分钟
             max_files: 10_000_000, // 默认限制 1000 万文件
         }
     }
@@ -131,10 +144,7 @@ impl Default for ResourceLimits {
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
-            #[cfg(target_os = "windows")]
-            engine: ScanEngineType::Mft,
-            #[cfg(not(target_os = "windows"))]
-            engine: ScanEngineType::Fs,
+            engine: ScanEngineType::Auto,
             follow_links: false,
             include_hidden: true,
             max_depth: 0,
@@ -142,6 +152,7 @@ impl Default for ScanOptions {
             exclude_dirs: vec![],
             exclude_exts: vec![],
             resource_limits: ResourceLimits::default(),
+            apparent_size: false,
             incremental: false,
             incremental_since: None,
         }

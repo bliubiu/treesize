@@ -49,6 +49,25 @@
 - SquirrelDisk
 
 
+
+### 约束和禁止条件
+
+- 禁用 npm 包管理，可用pnpm，bun
+- 禁用Maven，可用gradle
+
+- 必须编译配置优化，从源头减小体积
+
+
+
+## 附录
+
+### 参考连接
+
+- https://github.com/tobi/disktree
+- 仓库： git@github.com:bliubiu/treesize.git
+
+
+
 # AI 行为准则（Karpathy Standard）
 
 ## 核心原则

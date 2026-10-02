@@ -38,9 +38,7 @@ impl HistoryStorage {
 
     /// 获取默认数据库路径
     fn default_db_path() -> PathBuf {
-        let base = dirs_next::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("treesize");
+        let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("treesize");
         base.join("history.db")
     }
 
@@ -149,10 +147,7 @@ impl HistoryStorage {
     // ── 读取 ───────────────────────────────────────────────────────────────
 
     /// 获取指定路径的所有扫描快照（按时间升序）
-    pub fn list_snapshots(
-        &self,
-        scan_path: &str,
-    ) -> std::result::Result<Vec<ScanSnapshot>, rusqlite::Error> {
+    pub fn list_snapshots(&self, scan_path: &str) -> std::result::Result<Vec<ScanSnapshot>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, scanned_path, scanned_at, total_files, total_dirs, total_size, elapsed_ms
              FROM scan_snapshots
@@ -161,35 +156,14 @@ impl HistoryStorage {
         )?;
 
         let snapshots = stmt
-            .query_map(params![scan_path], |row| {
-                let scanned_at_str: String = row.get(2)?;
-                let scanned_at = chrono::NaiveDateTime::parse_from_str(
-                    &scanned_at_str,
-                    "%Y-%m-%dT%H:%M:%S",
-                )
-                .map(|naive| naive.and_local_timezone(chrono::Local).unwrap())
-                .unwrap_or_else(|_| chrono::Local::now());
-
-                Ok(ScanSnapshot {
-                    id: Some(row.get(0)?),
-                    scanned_path: row.get(1)?,
-                    scanned_at,
-                    total_files: row.get(3)?,
-                    total_dirs: row.get(4)?,
-                    total_size: row.get(5)?,
-                    elapsed_ms: row.get(6)?,
-                })
-            })?
+            .query_map(params![scan_path], |row| Self::parse_snapshot_row(row))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(snapshots)
     }
 
     /// 获取某次快照的分类明细
-    pub fn get_categories(
-        &self,
-        scan_id: i64,
-    ) -> std::result::Result<Vec<CategorySnapshot>, rusqlite::Error> {
+    pub fn get_categories(&self, scan_id: i64) -> std::result::Result<Vec<CategorySnapshot>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT category, size, file_count FROM category_snapshots WHERE scan_id = ?1 ORDER BY size DESC",
         )?;
@@ -208,13 +182,10 @@ impl HistoryStorage {
     }
 
     /// 获取某次快照的目录大小明细
-    pub fn get_dirs(
-        &self,
-        scan_id: i64,
-    ) -> std::result::Result<Vec<DirSizeSnapshot>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT relative_path, size FROM dir_snapshots WHERE scan_id = ?1 ORDER BY size DESC",
-        )?;
+    pub fn get_dirs(&self, scan_id: i64) -> std::result::Result<Vec<DirSizeSnapshot>, rusqlite::Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT relative_path, size FROM dir_snapshots WHERE scan_id = ?1 ORDER BY size DESC")?;
 
         let dirs = stmt
             .query_map(params![scan_id], |row| {
@@ -310,15 +281,33 @@ impl HistoryStorage {
 
     /// 列出所有有历史记录的扫描路径
     pub fn list_paths(&self) -> std::result::Result<Vec<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT scanned_path FROM scan_snapshots ORDER BY scanned_path",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT scanned_path FROM scan_snapshots ORDER BY scanned_path")?;
 
         let paths = stmt
             .query_map([], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(paths)
+    }
+
+    /// 将 SQL 行解析为 ScanSnapshot
+    fn parse_snapshot_row(row: &rusqlite::Row) -> rusqlite::Result<ScanSnapshot> {
+        let scanned_at_str: String = row.get(2)?;
+        let scanned_at = chrono::NaiveDateTime::parse_from_str(&scanned_at_str, "%Y-%m-%dT%H:%M:%S")
+            .map(|naive| naive.and_local_timezone(chrono::Local).unwrap())
+            .unwrap_or_else(|_| chrono::Local::now());
+
+        Ok(ScanSnapshot {
+            id: Some(row.get(0)?),
+            scanned_path: row.get(1)?,
+            scanned_at,
+            total_files: row.get(3)?,
+            total_dirs: row.get(4)?,
+            total_size: row.get(5)?,
+            elapsed_ms: row.get(6)?,
+        })
     }
 
     /// 获取两次快照的对比数据
@@ -342,45 +331,8 @@ impl HistoryStorage {
              FROM scan_snapshots WHERE id = ?1",
         )?;
 
-        let old = stmt.query_row(params![old_id], |row| {
-            let scanned_at_str: String = row.get(2)?;
-            let scanned_at = chrono::NaiveDateTime::parse_from_str(
-                &scanned_at_str,
-                "%Y-%m-%dT%H:%M:%S",
-            )
-            .map(|naive| naive.and_local_timezone(chrono::Local).unwrap())
-            .unwrap_or_else(|_| chrono::Local::now());
-
-            Ok(ScanSnapshot {
-                id: Some(row.get(0)?),
-                scanned_path: row.get(1)?,
-                scanned_at,
-                total_files: row.get(3)?,
-                total_dirs: row.get(4)?,
-                total_size: row.get(5)?,
-                elapsed_ms: row.get(6)?,
-            })
-        })?;
-
-        let new = stmt.query_row(params![new_id], |row| {
-            let scanned_at_str: String = row.get(2)?;
-            let scanned_at = chrono::NaiveDateTime::parse_from_str(
-                &scanned_at_str,
-                "%Y-%m-%dT%H:%M:%S",
-            )
-            .map(|naive| naive.and_local_timezone(chrono::Local).unwrap())
-            .unwrap_or_else(|_| chrono::Local::now());
-
-            Ok(ScanSnapshot {
-                id: Some(row.get(0)?),
-                scanned_path: row.get(1)?,
-                scanned_at,
-                total_files: row.get(3)?,
-                total_dirs: row.get(4)?,
-                total_size: row.get(5)?,
-                elapsed_ms: row.get(6)?,
-            })
-        })?;
+        let old = stmt.query_row(params![old_id], |row| Self::parse_snapshot_row(row))?;
+        let new = stmt.query_row(params![new_id], |row| Self::parse_snapshot_row(row))?;
 
         let old_cats = self.get_categories(old_id)?;
         let new_cats = self.get_categories(new_id)?;
@@ -434,8 +386,14 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
 
-        assert!(tables.contains(&"scan_snapshots".to_string()), "应包含 scan_snapshots 表");
-        assert!(tables.contains(&"category_snapshots".to_string()), "应包含 category_snapshots 表");
+        assert!(
+            tables.contains(&"scan_snapshots".to_string()),
+            "应包含 scan_snapshots 表"
+        );
+        assert!(
+            tables.contains(&"category_snapshots".to_string()),
+            "应包含 category_snapshots 表"
+        );
         assert!(tables.contains(&"dir_snapshots".to_string()), "应包含 dir_snapshots 表");
     }
 
@@ -457,14 +415,10 @@ mod tests {
         let (storage, _dir) = open_temp_db();
         let snap = make_snapshot("/test", 100, 10, 1_000_000, 500);
 
-        let scan_id = storage
-            .save_snapshot(&snap, &[], &[])
-            .expect("保存快照应成功");
+        let scan_id = storage.save_snapshot(&snap, &[], &[]).expect("保存快照应成功");
         assert!(scan_id > 0, "scan_id 应为正数");
 
-        let list = storage
-            .list_snapshots("/test")
-            .expect("列出快照应成功");
+        let list = storage.list_snapshots("/test").expect("列出快照应成功");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].scanned_path, "/test");
         assert_eq!(list[0].total_files, 100);
@@ -516,20 +470,14 @@ mod tests {
         // 验证分类
         let saved_cats = storage.get_categories(scan_id).unwrap();
         assert_eq!(saved_cats.len(), 2);
-        let doc = saved_cats
-            .iter()
-            .find(|c| c.category == "文档")
-            .unwrap();
+        let doc = saved_cats.iter().find(|c| c.category == "文档").unwrap();
         assert_eq!(doc.size, 300_000);
         assert_eq!(doc.file_count, 30);
 
         // 验证目录
         let saved_dirs = storage.get_dirs(scan_id).unwrap();
         assert_eq!(saved_dirs.len(), 2);
-        let sub1 = saved_dirs
-            .iter()
-            .find(|d| d.relative_path == "sub1")
-            .unwrap();
+        let sub1 = saved_dirs.iter().find(|d| d.relative_path == "sub1").unwrap();
         assert_eq!(sub1.size, 300_000);
     }
 
@@ -715,8 +663,7 @@ mod tests {
         let id1 = storage.save_snapshot(&snap1, &cats1, &dirs1).unwrap();
         let id2 = storage.save_snapshot(&snap2, &[], &[]).unwrap();
 
-        let (old, new, old_cats, new_cats, old_dirs, new_dirs) =
-            storage.get_diff_data(id1, id2).unwrap();
+        let (old, new, old_cats, new_cats, old_dirs, new_dirs) = storage.get_diff_data(id1, id2).unwrap();
 
         assert_eq!(old.total_files, 50);
         assert_eq!(new.total_files, 100);
@@ -756,8 +703,7 @@ mod tests {
         ];
         let id2 = storage.save_snapshot(&snap2, &[], &dirs2).unwrap();
 
-        let (_old, _new, _old_cats, _new_cats, old_dirs, new_dirs) =
-            storage.get_diff_data(id1, id2).unwrap();
+        let (_old, _new, _old_cats, _new_cats, old_dirs, new_dirs) = storage.get_diff_data(id1, id2).unwrap();
 
         assert_eq!(old_dirs.len(), 2);
         assert_eq!(new_dirs.len(), 2);

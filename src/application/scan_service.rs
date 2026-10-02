@@ -8,9 +8,7 @@ use std::time::SystemTime;
 
 use crate::domain::error::Result;
 use crate::domain::file_node::FileNode;
-use crate::domain::scan_engine::{
-    CancelToken, ScanEngine, ScanOptions, ScanProgress, ScanStats,
-};
+use crate::domain::scan_engine::{CancelToken, ScanEngine, ScanOptions, ScanProgress, ScanStats};
 
 /// 扫描服务
 pub struct ScanService {
@@ -64,8 +62,8 @@ fn count_errors(node: &FileNode) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::scan_engine::testing::MockScanEngine;
     use crate::domain::file_node::FileNode;
+    use crate::domain::scan_engine::testing::MockScanEngine;
     use std::path::PathBuf;
 
     #[test]

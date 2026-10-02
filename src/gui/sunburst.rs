@@ -119,10 +119,9 @@ impl SunburstView {
         }
         painter.add(Shape::Mesh(mesh));
 
-        // ── 绘制中心圆（根节点） ──
-        let [cr, cg, cb] = darken(FileCategory::Other.base_color(), 0);
-        painter.circle_filled(center, center_r, Color32::from_rgb(cr, cg, cb));
-        painter.circle_stroke(center, center_r, egui::Stroke::new(1.0, theme.border));
+        // ── 绘制中心圆（根节点）：使用主题强调色 ──
+        painter.circle_filled(center, center_r, theme.accent_dim);
+        painter.circle_stroke(center, center_r, egui::Stroke::new(1.0, theme.accent));
 
         // 中心标签（根目录名，最多显示 8 字）
         let root_label = if root.name.len() > 8 {

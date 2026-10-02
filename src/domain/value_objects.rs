@@ -98,40 +98,33 @@ impl FileCategory {
         let ext = ext.to_ascii_lowercase();
         match ext.as_str() {
             // 视频
-            "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg"
-            | "ts" | "rmvb" | "rm" => Self::Video,
+            "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg" | "ts" | "rmvb" | "rm" => {
+                Self::Video
+            },
             // 音频
-            "mp3" | "flac" | "wav" | "aac" | "ogg" | "wma" | "m4a" | "ape" | "opus" | "aiff" => {
-                Self::Audio
-            }
+            "mp3" | "flac" | "wav" | "aac" | "ogg" | "wma" | "m4a" | "ape" | "opus" | "aiff" => Self::Audio,
             // 图片
-            "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tiff" | "tif" | "webp" | "heic" | "heif"
-            | "svg" | "ico" | "psd" | "raw" | "cr2" | "nef" => Self::Image,
+            "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tiff" | "tif" | "webp" | "heic" | "heif" | "svg" | "ico"
+            | "psd" | "raw" | "cr2" | "nef" => Self::Image,
             // 文档
-            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp"
-            | "rtf" | "txt" | "md" | "csv" | "epub" | "djvu" | "pages" | "numbers" | "key" => {
-                Self::Document
-            }
+            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "rtf" | "txt" | "md"
+            | "csv" | "epub" | "djvu" | "pages" | "numbers" | "key" => Self::Document,
             // 压缩包
-            "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "lz4" | "iso" | "cab" => {
-                Self::Archive
-            }
+            "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "lz4" | "iso" | "cab" => Self::Archive,
             // 可执行
-            "exe" | "msi" | "app" | "dmg" | "deb" | "rpm" | "apk" | "appimage" | "bat" | "cmd"
-            | "ps1" | "sh" => Self::Executable,
+            "exe" | "msi" | "app" | "dmg" | "deb" | "rpm" | "apk" | "appimage" | "bat" | "cmd" | "ps1" | "sh" => {
+                Self::Executable
+            },
             // 源代码
-            "rs" | "go" | "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "java" | "kt" | "py"
-            | "js" | "tsx" | "jsx" | "rb" | "php" | "swift" | "scala" | "lua" | "pl"
-            | "cs" | "vb" | "fs" | "clj" | "ex" | "exs" | "elm" | "dart" | "gradle" | "sbt"
-            | "toml" | "yaml" | "yml" | "json" | "xml" | "ini" | "cfg" | "conf" => Self::Source,
+            "rs" | "go" | "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "java" | "kt" | "py" | "js" | "tsx" | "jsx"
+            | "rb" | "php" | "swift" | "scala" | "lua" | "pl" | "cs" | "vb" | "fs" | "clj" | "ex" | "exs" | "elm"
+            | "dart" | "gradle" | "sbt" | "toml" | "yaml" | "yml" | "json" | "xml" | "ini" | "cfg" | "conf" => {
+                Self::Source
+            },
             // 数据库
-            "db" | "sqlite" | "sqlite3" | "mdb" | "accdb" | "dbf" | "sql" | "bson" => {
-                Self::Database
-            }
+            "db" | "sqlite" | "sqlite3" | "mdb" | "accdb" | "dbf" | "sql" | "bson" => Self::Database,
             // 系统
-            "dll" | "so" | "dylib" | "sys" | "ko" | "drv" | "lnk" | "tmp" | "log" | "lock" => {
-                Self::System
-            }
+            "dll" | "so" | "dylib" | "sys" | "ko" | "drv" | "lnk" | "tmp" | "log" | "lock" => Self::System,
             _ => Self::Other,
         }
     }

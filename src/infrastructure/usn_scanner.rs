@@ -27,16 +27,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::error::{DomainError, Result};
 use crate::domain::file_node::FileNode;
-use crate::domain::scan_engine::{
-    CancelToken, ScanEngine, ScanOptions, ScanProgress,
-};
+use crate::domain::scan_engine::{CancelToken, ScanEngine, ScanOptions, ScanProgress};
 
 use super::ntfs_reader::{
-    build_size_map, close_handle, get_volume_info, open_volume,
-    parse_mft_records, path_to_volume_path, query_usn_journal,
-    read_mft_raw, read_usn_records, UsnRecord,
+    build_size_map, get_volume_info, parse_mft_records, path_to_volume_device, query_usn_journal, read_mft_raw,
+    read_usn_records, UsnRecord, VolumeHandle,
 };
-use windows_sys::Win32::Foundation::HANDLE;
 
 // ─── USN 扫描引擎 ──────────────────────────────────────────────────────────
 
@@ -77,14 +73,12 @@ impl ScanEngine for UsnScanEngine {
         progress: Option<&(dyn Fn(&ScanProgress) + Send + Sync)>,
         cancel: Option<&CancelToken>,
     ) -> Result<FileNode> {
-        let volume_path = path_to_volume_path(&root);
-        let vol_path = Path::new(&volume_path);
-        let handle = open_volume(vol_path)
-            .map_err(|e| DomainError::ScanFailed(format!("打开卷失败：{e}")))?;
+        let device = path_to_volume_device(&root);
+        let handle =
+            VolumeHandle::open(Path::new(&device)).map_err(|e| DomainError::ScanFailed(format!("打开卷失败：{e}")))?;
 
-        let result = do_usn_scan(handle, root, options, progress, cancel);
-        close_handle(handle);
-        result
+        // 句柄由 VolumeHandle 的 Drop 自动关闭
+        do_usn_scan(&handle, root, options, progress, cancel)
     }
 }
 
@@ -130,22 +124,20 @@ impl UsnIncrementalState {
                         "保存 USN 增量状态失败：{e}",
                     );
                 }
-            }
+            },
             Err(e) => {
                 tracing::warn!(
                     target: "treesize::usn",
                     "序列化 USN 增量状态失败：{e}",
                 );
-            }
+            },
         }
     }
 
     /// 获取状态文件的路径
     fn state_path(volume: &str) -> PathBuf {
         let safe_vol = volume.replace(':', "");
-        let base = dirs_next::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("treesize");
+        let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("treesize");
         base.join(format!("usn_state_{safe_vol}.json"))
     }
 }
@@ -154,7 +146,7 @@ impl UsnIncrementalState {
 
 /// USN 扫描内部实现（6 阶段流水线）
 fn do_usn_scan(
-    handle: HANDLE,
+    handle: &VolumeHandle,
     root: PathBuf,
     options: &ScanOptions,
     progress: Option<&(dyn Fn(&ScanProgress) + Send + Sync)>,
@@ -166,8 +158,8 @@ fn do_usn_scan(
     // ═══════════════════════════════════════════════════════════════════
     // Phase 1: 查询 USN Journal 状态
     // ═══════════════════════════════════════════════════════════════════
-    let journal_state = query_usn_journal(handle)
-        .map_err(|e| DomainError::ScanFailed(format!("查询 USN Journal 失败：{e}")))?;
+    let journal_state =
+        query_usn_journal(handle).map_err(|e| DomainError::ScanFailed(format!("查询 USN Journal 失败：{e}")))?;
 
     tracing::info!(
         target: "treesize::usn",
@@ -192,18 +184,15 @@ fn do_usn_scan(
     // ═══════════════════════════════════════════════════════════════════
     tracing::info!(target: "treesize::usn", "Phase 2: 开始读取 MFT 获取文件大小...");
 
-    let volume_info = get_volume_info(handle)
-        .map_err(|e| DomainError::ScanFailed(format!("获取卷信息失败：{e}")))?;
+    let volume_info = get_volume_info(handle).map_err(|e| DomainError::ScanFailed(format!("获取卷信息失败：{e}")))?;
 
-    let max_mft_records = 100_000_000u64.min(
-        (volume_info.mft_valid_data_length.max(0) as u64)
-            / volume_info.bytes_per_record as u64,
-    );
+    let max_mft_records =
+        100_000_000u64.min((volume_info.mft_valid_data_length.max(0) as u64) / volume_info.bytes_per_record as u64);
 
-    let raw_mft = read_mft_raw(handle, &volume_info, max_mft_records)
+    let mut raw_mft = read_mft_raw(handle, &volume_info, max_mft_records)
         .map_err(|e| DomainError::ScanFailed(format!("读取 MFT 失败：{e}")))?;
 
-    let parsed_mft = parse_mft_records(&raw_mft, volume_info.bytes_per_record)
+    let parsed_mft = parse_mft_records(&mut raw_mft, volume_info.bytes_per_record)
         .map_err(|e| DomainError::ScanFailed(format!("解析 MFT 失败：{e}")))?;
 
     // 构建 记录号→文件大小 映射表
@@ -232,23 +221,14 @@ fn do_usn_scan(
     // 验证 Journal ID 匹配后从该点开始增量读取。
     // Journal 被重置时自动降级为全量扫描。
     // ═══════════════════════════════════════════════════════════════════
-    let (since_usn, is_incremental_mode) = determine_start_usn(
-        options,
-        &journal_state,
-        &volume_letter,
-    );
+    let (since_usn, is_incremental_mode) = determine_start_usn(options, &journal_state, &volume_letter);
 
     // ═══════════════════════════════════════════════════════════════════
     // Phase 4: 读取 USN 记录
     // ═══════════════════════════════════════════════════════════════════
     let read_limit: u32 = 100_000;
-    let usn_records = read_usn_records(
-        handle,
-        journal_state.usn_journal_id,
-        since_usn,
-        read_limit,
-    )
-    .map_err(|e| DomainError::ScanFailed(format!("读取 USN 记录失败：{e}")))?;
+    let usn_records = read_usn_records(handle, journal_state.usn_journal_id, since_usn, read_limit)
+        .map_err(|e| DomainError::ScanFailed(format!("读取 USN 记录失败：{e}")))?;
 
     tracing::info!(
         target: "treesize::usn",
@@ -268,14 +248,7 @@ fn do_usn_scan(
     //
     // 利用 USN 的父引用重建目录层次结构，从 MFT 大小映射获取真实文件大小。
     // ═══════════════════════════════════════════════════════════════════
-    let root_node = build_tree_from_usn(
-        &usn_records,
-        &size_map,
-        &root,
-        options,
-        progress,
-        cancel,
-    )?;
+    let root_node = build_tree_from_usn(&usn_records, &size_map, &root, options, progress, cancel)?;
 
     let elapsed_ms = SystemTime::now()
         .duration_since(start)
@@ -300,9 +273,7 @@ fn do_usn_scan(
         volume: volume_letter.clone(),
         journal_id: journal_state.usn_journal_id,
         next_usn: journal_state.next_usn,
-        scanned_at: chrono::Local::now()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string(),
+        scanned_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     };
     new_state.save();
 
@@ -338,7 +309,7 @@ fn determine_start_usn(
                 "首次扫描，无增量状态，执行全量扫描",
             );
             return (journal_state.lowest_valid_usn, false);
-        }
+        },
     };
 
     // 验证 Journal ID 是否匹配
@@ -405,10 +376,7 @@ fn build_tree_from_usn(
     let mut parent_index: HashMap<u64, Vec<u64>> = HashMap::new();
     for (&file_ref, rec) in &best_entries {
         let parent_ref = rec.parent_file_reference_number & 0x0000_FFFF_FFFF_FFFF;
-        parent_index
-            .entry(parent_ref)
-            .or_default()
-            .push(file_ref);
+        parent_index.entry(parent_ref).or_default().push(file_ref);
     }
 
     // ── 步骤 2：从根（记录号 5）递归构建树 ──
@@ -429,13 +397,9 @@ fn build_tree_from_usn(
                         let child_path = current_path.join(&child_rec.file_name);
 
                         if child_rec.is_directory {
-                            if let Some(child_node) = build_recursive(
-                                child_ref,
-                                parent_index,
-                                best_entries,
-                                size_map,
-                                &child_path,
-                            ) {
+                            if let Some(child_node) =
+                                build_recursive(child_ref, parent_index, best_entries, size_map, &child_path)
+                            {
                                 child_nodes.push(child_node);
                             }
                         } else {
@@ -462,13 +426,9 @@ fn build_tree_from_usn(
                         let child_path = current_path.join(&child_rec.file_name);
 
                         if child_rec.is_directory {
-                            if let Some(child_node) = build_recursive(
-                                child_ref,
-                                parent_index,
-                                best_entries,
-                                size_map,
-                                &child_path,
-                            ) {
+                            if let Some(child_node) =
+                                build_recursive(child_ref, parent_index, best_entries, size_map, &child_path)
+                            {
                                 child_nodes.push(child_node);
                             }
                         } else {
@@ -483,14 +443,8 @@ fn build_tree_from_usn(
         }
     }
 
-    let mut root_node = build_recursive(
-        5,
-        &parent_index,
-        &best_entries,
-        size_map,
-        root_path,
-    )
-    .unwrap_or_else(|| FileNode::new_dir(root_path.to_path_buf(), None));
+    let mut root_node = build_recursive(5, &parent_index, &best_entries, size_map, root_path)
+        .unwrap_or_else(|| FileNode::new_dir(root_path.to_path_buf(), None));
 
     root_node.aggregate();
     root_node.sort_by_size_desc();
@@ -505,12 +459,10 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "需要 NTFS 卷和 USN Journal"]
+    #[ignore = "需要管理员权限的 NTFS 卷和 USN Journal"]
     fn usn_query_current_drive() {
-        let vol_path = Path::new("\\\\?\\C:\\");
-        let handle = open_volume(vol_path).unwrap();
-        let state = query_usn_journal(handle);
-        close_handle(handle);
+        let handle = VolumeHandle::open(Path::new(&path_to_volume_device(Path::new("C:\\")))).unwrap();
+        let state = query_usn_journal(&handle);
         assert!(state.is_ok(), "USN 查询失败：{:?}", state.err());
         let s = state.unwrap();
         assert!(s.usn_journal_id != 0);

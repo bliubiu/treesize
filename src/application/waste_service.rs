@@ -177,15 +177,11 @@ impl WasteService {
 
     /// 检测临时文件
     fn detect_temporary_files(nodes: &[&FileNode]) -> Vec<WasteItem> {
-        let temp_extensions = [
-            "tmp", "temp", "bak", "old", "orig", "swp", "swo",
-        ];
+        let temp_extensions = ["tmp", "temp", "bak", "old", "orig", "swp", "swo"];
 
         nodes
             .iter()
-            .filter(|n| {
-                n.is_file() && temp_extensions.iter().any(|ext| n.extension == *ext)
-            })
+            .filter(|n| n.is_file() && temp_extensions.iter().any(|ext| n.extension == *ext))
             .map(|n| WasteItem {
                 waste_type: WasteType::TemporaryFile,
                 path: n.path.clone(),
@@ -206,14 +202,15 @@ impl WasteService {
         nodes
             .iter()
             .filter(|n| {
-                n.is_file() && n.modified.map_or(false, |m| {
-                    now.duration_since(m).unwrap_or(Duration::ZERO) > threshold
-                })
+                n.is_file()
+                    && n.modified
+                        .map_or(false, |m| now.duration_since(m).unwrap_or(Duration::ZERO) > threshold)
             })
             .map(|n| {
-                let days = n.modified.and_then(|m| {
-                    now.duration_since(m).ok().map(|d| d.as_secs() / 86400)
-                }).unwrap_or(0);
+                let days = n
+                    .modified
+                    .and_then(|m| now.duration_since(m).ok().map(|d| d.as_secs() / 86400))
+                    .unwrap_or(0);
 
                 WasteItem {
                     waste_type: WasteType::StaleFile,
@@ -243,16 +240,26 @@ impl WasteService {
     fn detect_cache_files(nodes: &[&FileNode]) -> Vec<WasteItem> {
         // 缓存目录精确匹配列表
         let cache_dir_names = [
-            "node_modules", "__pycache__", ".cache", ".npm", ".yarn",
-            "target", "build", "dist", ".gradle", ".m2",
-            ".cargo", ".rustup", ".conda", ".venv", "venv",
+            "node_modules",
+            "__pycache__",
+            ".cache",
+            ".npm",
+            ".yarn",
+            "target",
+            "build",
+            "dist",
+            ".gradle",
+            ".m2",
+            ".cargo",
+            ".rustup",
+            ".conda",
+            ".venv",
+            "venv",
         ];
 
         nodes
             .iter()
-            .filter(|n| {
-                n.is_dir() && cache_dir_names.iter().any(|name| n.name == *name)
-            })
+            .filter(|n| n.is_dir() && cache_dir_names.iter().any(|name| n.name == *name))
             .map(|n| WasteItem {
                 waste_type: WasteType::CacheFile,
                 path: n.path.clone(),
@@ -310,16 +317,14 @@ impl WasteService {
 
         for archive in archives {
             // 检查是否存在同名目录（可能是解压后的内容）
-            let archive_stem = archive.path.file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| {
-                    // 处理 .tar.gz 等双扩展名
-                    if s.ends_with(".tar") {
-                        s.trim_end_matches(".tar")
-                    } else {
-                        s
-                    }
-                });
+            let archive_stem = archive.path.file_stem().and_then(|s| s.to_str()).map(|s| {
+                // 处理 .tar.gz 等双扩展名
+                if s.ends_with(".tar") {
+                    s.trim_end_matches(".tar")
+                } else {
+                    s
+                }
+            });
 
             if let Some(stem) = archive_stem {
                 let parent = archive.path.parent().unwrap_or(Path::new(""));
@@ -342,10 +347,7 @@ impl WasteService {
 
     /// 检测系统残留
     fn detect_system_residues(nodes: &[&FileNode]) -> Vec<WasteItem> {
-        let residue_patterns = [
-            ".uninstall", ".installer", "unins",
-            ".backup", ".migrate", ".upgrade",
-        ];
+        let residue_patterns = [".uninstall", ".installer", "unins", ".backup", ".migrate", ".upgrade"];
 
         nodes
             .iter()
@@ -414,7 +416,8 @@ impl WasteService {
 
         // 按类型优先级和大小排序 items
         items.sort_by(|a, b| {
-            b.waste_type.cleanup_priority()
+            b.waste_type
+                .cleanup_priority()
                 .cmp(&a.waste_type.cleanup_priority())
                 .then_with(|| b.size.cmp(&a.size))
         });
@@ -449,7 +452,8 @@ mod tests {
         let tree = crate::test_utils::build_tree_from_dir(root);
         let report = WasteService::scan(&tree);
 
-        let empty_dirs: Vec<_> = report.items
+        let empty_dirs: Vec<_> = report
+            .items
             .iter()
             .filter(|i| i.waste_type == WasteType::EmptyDirectory)
             .collect();
@@ -468,7 +472,8 @@ mod tests {
         let tree = crate::test_utils::build_tree_from_dir(root);
         let report = WasteService::scan(&tree);
 
-        let zero_files: Vec<_> = report.items
+        let zero_files: Vec<_> = report
+            .items
             .iter()
             .filter(|i| i.waste_type == WasteType::ZeroByteFile)
             .collect();
@@ -488,7 +493,8 @@ mod tests {
         let tree = crate::test_utils::build_tree_from_dir(root);
         let report = WasteService::scan(&tree);
 
-        let temp_files: Vec<_> = report.items
+        let temp_files: Vec<_> = report
+            .items
             .iter()
             .filter(|i| i.waste_type == WasteType::TemporaryFile)
             .collect();
@@ -507,7 +513,8 @@ mod tests {
         let tree = crate::test_utils::build_tree_from_dir(root);
         let report = WasteService::scan(&tree);
 
-        let log_files: Vec<_> = report.items
+        let log_files: Vec<_> = report
+            .items
             .iter()
             .filter(|i| i.waste_type == WasteType::LogFile)
             .collect();
@@ -528,7 +535,8 @@ mod tests {
         let tree = crate::test_utils::build_tree_from_dir(root);
         let report = WasteService::scan(&tree);
 
-        let cache_dirs: Vec<_> = report.items
+        let cache_dirs: Vec<_> = report
+            .items
             .iter()
             .filter(|i| i.waste_type == WasteType::CacheFile)
             .collect();
@@ -547,7 +555,8 @@ mod tests {
         let tree = crate::test_utils::build_tree_from_dir(root);
         let report = WasteService::scan(&tree);
 
-        let lock_files: Vec<_> = report.items
+        let lock_files: Vec<_> = report
+            .items
             .iter()
             .filter(|i| i.waste_type == WasteType::LockFile)
             .collect();

@@ -126,9 +126,16 @@ pub struct CliArgs {
     #[arg(long = "log-dir", default_value = "logs")]
     pub log_dir: PathBuf,
 
-    /// 扫描引擎类型：fs（默认，跨平台）| mft（仅 Windows NTFS 快速）| usn（仅 Windows NTFS 增量）
-    #[arg(long = "engine", default_value_t = ScanEngineType::Fs)]
+    /// 扫描引擎类型：auto（默认，自动选择）| fs（跨平台）| mft（仅 Windows NTFS 快速）| usn（仅 Windows NTFS 增量）
+    #[arg(long = "engine", default_value_t = ScanEngineType::Auto)]
     pub engine: ScanEngineType,
+
+    /// 用表观大小（文件逻辑长度）代替分配大小（卷实际占用）
+    ///
+    /// 默认统计分配大小：3 字节的文件在 NTFS 上实际占满一个簇，
+    /// 分配大小才与资源管理器、TreeSize、`du` 对得上。
+    #[arg(long = "apparent-size", action = ArgAction::SetTrue)]
+    pub apparent_size: bool,
 }
 
 impl CliArgs {
@@ -143,6 +150,7 @@ impl CliArgs {
             exclude_dirs: self.exclude_dirs.clone(),
             exclude_exts: self.exclude_exts.clone(),
             resource_limits: ResourceLimits::default(),
+            apparent_size: self.apparent_size,
             incremental: false,
             incremental_since: None,
         }
@@ -173,7 +181,8 @@ impl Default for CliArgs {
             exclude_exts: vec![],
             log_level: LogLevel::Info,
             log_dir: PathBuf::from("logs"),
-            engine: ScanEngineType::Fs,
+            engine: ScanEngineType::Auto,
+            apparent_size: false,
         }
     }
 }

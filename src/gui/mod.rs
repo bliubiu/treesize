@@ -15,10 +15,7 @@ use crate::domain::error::Result;
 
 /// GUI 入口
 pub fn run(args: &CliArgs) -> Result<()> {
-    let path = args
-        .path
-        .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let path = args.path.clone().unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let options = app::GuiOptions {
         initial_path: path,

@@ -3,13 +3,9 @@
 //! 对扫描历史数据进行统计分析，识别增长趋势。
 //! 领域逻辑集中在 `TrendReport` 和 `GrowthEntry` 的构造。
 
+use crate::application::models::{compute_top_growing, CategoryTrend, SizePoint, TrendReport};
 use crate::domain::file_node::FileNode;
-use crate::application::models::{
-    compute_top_growing, CategoryTrend, SizePoint, TrendReport,
-};
-use crate::domain::scan_history::{
-    CategorySnapshot, DirSizeSnapshot, ScanSnapshot,
-};
+use crate::domain::scan_history::{CategorySnapshot, DirSizeSnapshot, ScanSnapshot};
 
 /// 趋势分析服务
 pub struct TrendService;
@@ -24,13 +20,10 @@ impl TrendService {
         let snapshot = ScanSnapshot::new(path, node.file_count, node.dir_count, node.size.0, elapsed_ms);
 
         // 分类统计
-        let mut category_map: std::collections::HashMap<String, (u64, u64)> =
-            std::collections::HashMap::new();
+        let mut category_map: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
         for n in node.iter_all() {
             if n.is_file() {
-                let entry = category_map
-                    .entry(n.category.label().to_string())
-                    .or_insert((0, 0));
+                let entry = category_map.entry(n.category.label().to_string()).or_insert((0, 0));
                 entry.0 += n.size.0;
                 entry.1 += 1;
             }
@@ -165,17 +158,11 @@ mod tests {
 
         // 验证分类统计
         assert!(!categories.is_empty());
-        let doc_cat = categories
-            .iter()
-            .find(|c| c.category == "文档")
-            .expect("应有文档分类");
+        let doc_cat = categories.iter().find(|c| c.category == "文档").expect("应有文档分类");
         assert_eq!(doc_cat.file_count, 2); // a.txt + c.txt
         assert_eq!(doc_cat.size, 150);
 
-        let video_cat = categories
-            .iter()
-            .find(|c| c.category == "视频")
-            .expect("应有视频分类");
+        let video_cat = categories.iter().find(|c| c.category == "视频").expect("应有视频分类");
         assert_eq!(video_cat.file_count, 1);
         assert_eq!(video_cat.size, 500);
 
@@ -219,8 +206,7 @@ mod tests {
 
     #[test]
     fn build_trend_report_single_snapshot() {
-        let snap =
-            ScanSnapshot::new(&PathBuf::from("/test"), 100, 10, 1_000_000, 500);
+        let snap = ScanSnapshot::new(&PathBuf::from("/test"), 100, 10, 1_000_000, 500);
         let cats = vec![CategorySnapshot {
             category: "文档".to_string(),
             size: 600_000,
@@ -243,18 +229,14 @@ mod tests {
 
     #[test]
     fn build_trend_report_multiple_snapshots() {
-        let snap1 =
-            ScanSnapshot::new(&PathBuf::from("/test"), 50, 5, 500_000, 300);
-        let snap2 =
-            ScanSnapshot::new(&PathBuf::from("/test"), 100, 10, 1_000_000, 500);
+        let snap1 = ScanSnapshot::new(&PathBuf::from("/test"), 50, 5, 500_000, 300);
+        let snap2 = ScanSnapshot::new(&PathBuf::from("/test"), 100, 10, 1_000_000, 500);
 
-        let cats1 = vec![
-            CategorySnapshot {
-                category: "文档".to_string(),
-                size: 300_000,
-                file_count: 30,
-            },
-        ];
+        let cats1 = vec![CategorySnapshot {
+            category: "文档".to_string(),
+            size: 300_000,
+            file_count: 30,
+        }];
         let cats2 = vec![
             CategorySnapshot {
                 category: "文档".to_string(),
@@ -283,8 +265,7 @@ mod tests {
             },
         ];
 
-        let report =
-            TrendService::build_trend_report(&[snap1, snap2], &[cats1, cats2], &[dirs1, dirs2]);
+        let report = TrendService::build_trend_report(&[snap1, snap2], &[cats1, cats2], &[dirs1, dirs2]);
 
         // 总趋势
         assert_eq!(report.size_trend.len(), 2);
@@ -313,12 +294,9 @@ mod tests {
     #[test]
     fn build_trend_report_category_trend_merge() {
         // 测试同一个分类在多张快照中出现时的趋势合并
-        let snap1 =
-            ScanSnapshot::new(&PathBuf::from("/test"), 10, 1, 1000, 100);
-        let snap2 =
-            ScanSnapshot::new(&PathBuf::from("/test"), 20, 2, 2000, 200);
-        let snap3 =
-            ScanSnapshot::new(&PathBuf::from("/test"), 30, 3, 3000, 300);
+        let snap1 = ScanSnapshot::new(&PathBuf::from("/test"), 10, 1, 1000, 100);
+        let snap2 = ScanSnapshot::new(&PathBuf::from("/test"), 20, 2, 2000, 200);
+        let snap3 = ScanSnapshot::new(&PathBuf::from("/test"), 30, 3, 3000, 300);
 
         let cats1 = vec![CategorySnapshot {
             category: "图片".to_string(),
@@ -336,8 +314,11 @@ mod tests {
             file_count: 20,
         }];
 
-        let report =
-            TrendService::build_trend_report(&[snap1, snap2, snap3], &[cats1, cats2, cats3], &[vec![], vec![], vec![]]);
+        let report = TrendService::build_trend_report(
+            &[snap1, snap2, snap3],
+            &[cats1, cats2, cats3],
+            &[vec![], vec![], vec![]],
+        );
 
         let img_trend = report
             .category_trends
@@ -348,5 +329,49 @@ mod tests {
         assert_eq!(img_trend.size_history[0].total_size, 1000);
         assert_eq!(img_trend.size_history[1].total_size, 1500);
         assert_eq!(img_trend.size_history[2].total_size, 2000);
+    }
+
+    #[test]
+    fn compute_top_growing_returns_empty_for_single_snapshot() {
+        let snap = ScanSnapshot::new(&PathBuf::from("/test"), 10, 1, 1000, 100);
+        let empty = compute_top_growing(&[snap], &[vec![]]);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn compute_top_growing_ranks_by_growth() {
+        let snap1 = ScanSnapshot::new(&PathBuf::from("/test"), 50, 5, 1000, 100);
+        let snap2 = ScanSnapshot::new(&PathBuf::from("/test"), 50, 5, 1000, 100);
+
+        let dirs1 = vec![
+            DirSizeSnapshot {
+                relative_path: "a".into(),
+                size: 100,
+            },
+            DirSizeSnapshot {
+                relative_path: "b".into(),
+                size: 200,
+            },
+        ];
+        let dirs2 = vec![
+            DirSizeSnapshot {
+                relative_path: "a".into(),
+                size: 300,
+            }, // +200 增长最大
+            DirSizeSnapshot {
+                relative_path: "b".into(),
+                size: 250,
+            }, // +50
+            DirSizeSnapshot {
+                relative_path: "c".into(),
+                size: 100,
+            }, // 新增
+        ];
+
+        let growing = compute_top_growing(&[snap1, snap2], &[dirs1, dirs2]);
+        assert!(!growing.is_empty());
+        // 增长最大的排第⼀
+        assert_eq!(growing[0].name, "a");
+        assert_eq!(growing[0].growth_bytes, 200);
     }
 }

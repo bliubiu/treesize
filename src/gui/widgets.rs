@@ -24,12 +24,10 @@ pub fn render_tab_button(
         theme.tab_text_inactive
     };
 
-    let button = egui::Button::new(
-        egui::RichText::new(label).color(text_color).strong(),
-    )
-    .fill(bg)
-    .rounding(egui::Rounding::same(4.0))
-    .min_size(Vec2::new(0.0, 28.0));
+    let button = egui::Button::new(egui::RichText::new(label).color(text_color).strong())
+        .fill(bg)
+        .rounding(egui::Rounding::same(4.0))
+        .min_size(Vec2::new(0.0, 28.0));
 
     let resp = ui.horizontal(|ui| {
         if ui.add(button).clicked() {
@@ -38,9 +36,7 @@ pub fn render_tab_button(
         }
         if let Some(n) = badge {
             let badge_w = 28.0;
-            let badge_rect = ui
-                .allocate_exact_size(Vec2::new(badge_w, 16.0), egui::Sense::hover())
-                .0;
+            let badge_rect = ui.allocate_exact_size(Vec2::new(badge_w, 16.0), egui::Sense::hover()).0;
             let painter = ui.painter();
             painter.rect_filled(badge_rect, 8.0, theme.bg_hover);
             painter.text(
@@ -68,7 +64,22 @@ pub fn render_tab_button(
 }
 
 /// 渲染统计卡片
+///
+/// `min_width` 为 `Some(w)` 时设置固定最小宽度，`None` 使用默认值 120px
 pub fn stat_card(ui: &mut egui::Ui, label: &str, value: &str, accent: Color32, theme: &ThemeColors) {
+    stat_card_sized(ui, label, value, accent, theme, None)
+}
+
+/// 同 `stat_card` 但支持指定最小宽度
+pub fn stat_card_sized(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &str,
+    accent: Color32,
+    theme: &ThemeColors,
+    min_width: Option<f32>,
+) {
+    let w = min_width.unwrap_or(120.0);
     let frame = egui::Frame::none()
         .fill(theme.bg_card)
         .rounding(egui::Rounding::same(4.0))
@@ -76,29 +87,16 @@ pub fn stat_card(ui: &mut egui::Ui, label: &str, value: &str, accent: Color32, t
         .inner_margin(egui::Margin::symmetric(12.0, 8.0));
 
     frame.show(ui, |ui: &mut egui::Ui| {
-        ui.set_min_size(Vec2::new(120.0, 48.0));
+        ui.set_min_size(Vec2::new(w, 48.0));
         ui.vertical(|ui: &mut egui::Ui| {
-            ui.label(
-                egui::RichText::new(label)
-                    .color(theme.text_secondary)
-                    .small(),
-            );
-            ui.label(
-                egui::RichText::new(value)
-                    .color(accent)
-                    .strong(),
-            );
+            ui.label(egui::RichText::new(label).color(theme.text_secondary).small());
+            ui.label(egui::RichText::new(value).color(accent).strong());
         });
     });
 }
 
 /// 渲染洞察行
-pub fn insight_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    node: Option<&crate::domain::FileNode>,
-    theme: &ThemeColors,
-) {
+pub fn insight_row(ui: &mut egui::Ui, label: &str, node: Option<&crate::domain::FileNode>, theme: &ThemeColors) {
     ui.label(egui::RichText::new(label).color(theme.text_secondary));
     match node {
         Some(n) => {
@@ -110,10 +108,10 @@ pub fn insight_row(
                         .family(egui::FontFamily::Monospace),
                 );
             });
-        }
+        },
         None => {
             ui.label(egui::RichText::new("—").color(theme.text_dim));
-        }
+        },
     }
     ui.end_row();
 }
@@ -130,20 +128,50 @@ pub fn painter_dot_color(ui: &mut egui::Ui, color: Color32) {
     painter_dot(ui, color);
 }
 
-/// 统一空状态
+/// 统一空状态（带绘制图标）
 pub fn render_empty_state(ui: &mut egui::Ui, title: &str, hint: &str) {
+    let center_x = ui.min_rect().center().x;
+
+    // 绘制简单图标：文件夹轮廓 + 搜索标识
+    let icon_y = ui.cursor().min.y + 40.0;
+    let icon_size = 48.0;
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(center_x, icon_y + icon_size / 2.0),
+        egui::Vec2::new(icon_size, icon_size),
+    );
+    let painter = ui.painter();
+
+    // 文件夹主体（矩形 + 顶部折角）
+    let body_color = Color32::from_gray(90);
+    let body_rect = egui::Rect::from_min_size(
+        egui::pos2(icon_rect.min.x + 4.0, icon_rect.min.y + 10.0),
+        egui::Vec2::new(icon_size - 8.0, icon_size - 14.0),
+    );
+    painter.rect_filled(body_rect, 3.0, body_color);
+
+    // 文件夹标签（小矩形在上方）
+    let tab_rect = egui::Rect::from_min_size(
+        egui::pos2(icon_rect.min.x + 2.0, icon_rect.min.y + 2.0),
+        egui::Vec2::new(18.0, 10.0),
+    );
+    painter.rect_filled(tab_rect, 2.0, body_color);
+
+    // 问号标识在文件夹中间
+    let q_color = Color32::from_gray(160);
+    painter.text(
+        body_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "?",
+        egui::FontId::proportional(20.0),
+        q_color,
+    );
+
+    // 文字部分
+    ui.add_space(icon_size + 60.0);
     ui.vertical_centered(|ui| {
-        ui.add_space(60.0);
-        ui.label(
-            egui::RichText::new(title)
-                .color(Color32::from_gray(160))
-                .strong(),
-        );
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new(hint)
-                .color(Color32::from_gray(140)),
-        );
+        ui.label(egui::RichText::new(title).color(Color32::from_gray(180)).strong());
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(hint).color(Color32::from_gray(140)));
     });
 }
 
@@ -173,22 +201,13 @@ pub fn _format_thousands(n: u64) -> String {
 }
 
 /// 表格中的占比条 cell（自定义填充色）
-pub fn bar_cell_color(
-    ui: &mut egui::Ui,
-    percent: f64,
-    max_percent: f64,
-    fill: Color32,
-    theme: &ThemeColors,
-) {
+pub fn bar_cell_color(ui: &mut egui::Ui, percent: f64, max_percent: f64, fill: Color32, theme: &ThemeColors) {
     let w = 120.0;
     let h = 10.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 2.0, theme.bar_track);
     let ratio = (percent / max_percent).clamp(0.0, 1.0) as f32;
-    let fill_rect = egui::Rect::from_min_size(
-        rect.min,
-        Vec2::new(rect.width() * ratio, rect.height()),
-    );
+    let fill_rect = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * ratio, rect.height()));
     painter.rect_filled(fill_rect, 2.0, fill);
 }
