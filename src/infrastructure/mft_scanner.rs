@@ -292,14 +292,16 @@ fn rebuild_tree(
     }
 
     // 根记录号固定为 5
-    let mut root_node = build_recursive(
-        5,
-        &parent_index,
-        root_path,
-        options.min_size,
-        &options.exclude_dirs,
-        &options.exclude_exts,
-    );
+    let mut root_node = stacker::maybe_grow(64 * 1024, 256 * 1024 * 1024, || {
+        build_recursive(
+            5,
+            &parent_index,
+            root_path,
+            options.min_size,
+            &options.exclude_dirs,
+            &options.exclude_exts,
+        )
+    });
 
     // 回溯聚合
     root_node.aggregate();

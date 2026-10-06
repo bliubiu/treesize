@@ -68,6 +68,11 @@
 - **卷句柄泄漏**：`close_handle(HANDLE)` 改为 `VolumeHandle` newtype + `Drop`，
   解引用裸指针的 `unsafe` 收敛到 `VolumeHandle::open` 一处，
   错误分支不再需要手动关闭
+- **树构建递归深度导致栈溢出（MFT/USN）**
+  - GUI 扫描线程使用 `std::thread::Builder` 设置 `stack_size = 256 MB`
+  - `mft_scanner::rebuild_tree` 与 `usn_scanner::build_tree_from_usn` 使用 `stacker::maybe_grow`（red_zone 64 KB，stack_size 256 MB）扩栈防护
+  - 新增依赖 `stacker = "0.1"`
+- **目录大小递归（工具函数）改为迭代 DFS，消除潜在栈溢出**（`app.rs::dir_size_recursive`）
 
 ### 已知问题
 

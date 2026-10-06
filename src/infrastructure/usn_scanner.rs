@@ -443,8 +443,10 @@ fn build_tree_from_usn(
         }
     }
 
-    let mut root_node = build_recursive(5, &parent_index, &best_entries, size_map, root_path)
-        .unwrap_or_else(|| FileNode::new_dir(root_path.to_path_buf(), None));
+    let mut root_node = stacker::maybe_grow(64 * 1024, 256 * 1024 * 1024, || {
+        build_recursive(5, &parent_index, &best_entries, size_map, root_path)
+    })
+    .unwrap_or_else(|| FileNode::new_dir(root_path.to_path_buf(), None));
 
     root_node.aggregate();
     root_node.sort_by_size_desc();

@@ -323,7 +323,10 @@ impl TreeSizeApp {
         let path_clone = path.clone();
         tracing::info!(target: "treesize::gui", "即将启动扫描线程，代次：{}", generation);
 
-        std::thread::spawn(move || {
+        std::thread::Builder::new()
+            .name("treesize-scan".to_string())
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
             tracing::info!(target: "treesize::gui", "扫描线程已启动，路径：{}", path_clone.display());
 
             let mut current_options = options.clone();
@@ -403,7 +406,8 @@ impl TreeSizeApp {
                     s.stats = Some(st);
                 }
             }
-        });
+        })
+        .expect("创建扫描线程失败");
     }
 
     fn cancel_scan(&mut self) {

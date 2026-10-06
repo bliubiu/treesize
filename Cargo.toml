@@ -16,6 +16,8 @@ name = "treesize"
 path = "src/lib.rs"
 
 [dependencies]
+stacker = "0.1"
+
 # CLI 参数解析
 clap = { version = "4.5", features = ["derive", "cargo"] }
 
