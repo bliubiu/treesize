@@ -73,6 +73,11 @@
   - `mft_scanner::rebuild_tree` 与 `usn_scanner::build_tree_from_usn` 使用 `stacker::maybe_grow`（red_zone 64 KB，stack_size 256 MB）扩栈防护
   - 新增依赖 `stacker = "0.1"`
 - **目录大小递归（工具函数）改为迭代 DFS，消除潜在栈溢出**（`app.rs::dir_size_recursive`）
+- **`cargo build --release` 编译警告清零**
+  - `egui::Stroke::new(1.0, ...)` 等 16 处浮点字面量补上显式 `f32` 类型，
+    消除 `float_literal_f32_fallback` 警告
+    （涉及 `theme.rs` / `widgets.rs` / `treemap.rs` / `sunburst.rs` /
+    `render/trend.rs` / `render/dashboard.rs`；该警告在未来 Rust 版本将升级为硬错误）
 
 ### 已知问题
 

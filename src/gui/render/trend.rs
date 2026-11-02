@@ -217,7 +217,7 @@ pub(crate) fn trend_line_chart(ui: &mut egui::Ui, trend: &TrendReport, theme: &T
     let size_range = (max_size - min_size).max(1) as f64;
 
     // 背景网格
-    painter.rect_stroke(plot_rect, 0.0, egui::Stroke::new(1.0, theme.border_light));
+    painter.rect_stroke(plot_rect, 0.0, egui::Stroke::new(1.0_f32, theme.border_light));
 
     // Y 轴标签
     for i in 0..=4 {
@@ -233,7 +233,7 @@ pub(crate) fn trend_line_chart(ui: &mut egui::Ui, trend: &TrendReport, theme: &T
         if i > 0 {
             painter.line_segment(
                 [Pos2::new(plot_rect.min.x, y), Pos2::new(plot_rect.max.x, y)],
-                egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(200, 200, 200, 30)),
+                egui::Stroke::new(1.0_f32, Color32::from_rgba_premultiplied(200, 200, 200, 30)),
             );
         }
     }
@@ -279,7 +279,7 @@ pub(crate) fn trend_line_chart(ui: &mut egui::Ui, trend: &TrendReport, theme: &T
         }
 
         for i in 0..points.len() - 1 {
-            painter.line_segment([points[i], points[i + 1]], egui::Stroke::new(2.0, theme.accent));
+            painter.line_segment([points[i], points[i + 1]], egui::Stroke::new(2.0_f32, theme.accent));
         }
 
         for (i, &p) in points.iter().enumerate() {
@@ -289,7 +289,7 @@ pub(crate) fn trend_line_chart(ui: &mut egui::Ui, trend: &TrendReport, theme: &T
                 theme.accent_dim
             };
             painter.circle_filled(p, 3.0, fill);
-            painter.circle_stroke(p, 3.0, egui::Stroke::new(1.0, Color32::WHITE));
+            painter.circle_stroke(p, 3.0, egui::Stroke::new(1.0_f32, Color32::WHITE));
         }
     }
 

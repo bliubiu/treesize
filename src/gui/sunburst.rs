@@ -121,7 +121,7 @@ impl SunburstView {
 
         // ── 绘制中心圆（根节点）：使用主题强调色 ──
         painter.circle_filled(center, center_r, theme.accent_dim);
-        painter.circle_stroke(center, center_r, egui::Stroke::new(1.0, theme.accent));
+        painter.circle_stroke(center, center_r, egui::Stroke::new(1.0_f32, theme.accent));
 
         // 中心标签（根目录名，最多显示 8 字）
         let root_label = if root.name.len() > 8 {
@@ -284,7 +284,7 @@ fn darken([r, g, b]: [u8; 3], depth: usize) -> [u8; 3] {
 /// 绘制颜色分类图例
 fn draw_legend(painter: &mut egui::Painter, rect: Rect, theme: &ThemeColors) {
     painter.rect_filled(rect, 4.0, Color32::from_rgba_premultiplied(15, 20, 25, 220));
-    painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, theme.border_light));
+    painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, theme.border_light));
 
     let categories = [
         FileCategory::Video,

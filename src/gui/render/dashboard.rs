@@ -118,7 +118,7 @@ fn render_signature_bar(ui: &mut egui::Ui, node: &FileNode, theme: &ThemeColors,
         if let Some(pos) = response.hover_pos() {
             if seg_rect.contains(pos) {
                 hover_idx = Some(i);
-                painter.rect_stroke(seg_rect, 0.0, egui::Stroke::new(2.0, Color32::WHITE));
+                painter.rect_stroke(seg_rect, 0.0, egui::Stroke::new(2.0_f32, Color32::WHITE));
             }
         }
 

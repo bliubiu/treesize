@@ -58,7 +58,7 @@ pub fn render_tab_button(
                 egui::pos2(rect.min.x + 2.0, line_y),
                 egui::pos2(rect.max.x - 2.0, line_y),
             ],
-            egui::Stroke::new(2.0, theme.accent),
+            egui::Stroke::new(2.0_f32, theme.accent),
         );
     }
 }
@@ -83,7 +83,7 @@ pub fn stat_card_sized(
     let frame = egui::Frame::none()
         .fill(theme.bg_card)
         .rounding(egui::Rounding::same(4.0))
-        .stroke(egui::Stroke::new(1.0, theme.border))
+        .stroke(egui::Stroke::new(1.0_f32, theme.border))
         .inner_margin(egui::Margin::symmetric(12.0, 8.0));
 
     frame.show(ui, |ui: &mut egui::Ui| {

@@ -248,7 +248,7 @@ fn draw_cell(painter: &mut egui::Painter, rect: Rect, node: &FileNode, depth: us
     let border = Color32::from_black_alpha(100);
 
     painter.rect_filled(rect, 0.0, color);
-    painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, border));
+    painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0_f32, border));
 
     // 文字标签（仅当区域足够大）
     if rect.width() > 50.0 && rect.height() > 18.0 {
@@ -284,7 +284,7 @@ fn draw_legend(painter: &mut egui::Painter, rect: Rect, theme: &ThemeColors) {
     // 使用主题背景色（带透明度），避免完全遮挡数据
     let bg = theme.bg_primary;
     painter.rect_filled(rect, 4.0, Color32::from_rgba_premultiplied(bg.r(), bg.g(), bg.b(), 200));
-    painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, theme.border_light));
+    painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, theme.border_light));
 
     let categories = [
         FileCategory::Video,

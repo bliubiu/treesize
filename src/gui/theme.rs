@@ -118,15 +118,15 @@ pub fn apply_theme(ctx: &Context, dark: bool) -> ThemeColors {
 
     visuals.panel_fill = colors.bg_primary;
     visuals.window_fill = colors.bg_surface;
-    visuals.window_stroke = egui::Stroke::new(1.0, colors.border);
+    visuals.window_stroke = egui::Stroke::new(1.0_f32, colors.border);
     visuals.widgets.noninteractive.bg_fill = colors.bg_surface;
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, colors.text_secondary);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, colors.text_secondary);
     visuals.widgets.inactive.bg_fill = colors.bg_card;
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, colors.text_primary);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, colors.text_primary);
     visuals.widgets.hovered.bg_fill = colors.bg_hover;
     visuals.widgets.active.bg_fill = colors.accent;
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(2.0, colors.accent);
-    visuals.selection.stroke = egui::Stroke::new(1.0, colors.accent);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(2.0_f32, colors.accent);
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, colors.accent);
     visuals.hyperlink_color = colors.accent;
 
     ctx.set_visuals(visuals);
