@@ -19,7 +19,7 @@
 
 #![cfg(target_os = "windows")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -380,12 +380,14 @@ fn build_tree_from_usn(
     }
 
     // ── 步骤 2：从根（记录号 5）递归构建树 ──
+    // visited 集合保证每个记录号只建树一次，防御 USN 中损坏父指针形成的引用环
     fn build_recursive(
         record_number: u64,
         parent_index: &HashMap<u64, Vec<u64>>,
         best_entries: &HashMap<u64, &UsnRecord>,
         size_map: &HashMap<u64, u64>,
         current_path: &Path,
+        visited: &mut HashSet<u64>,
     ) -> Option<FileNode> {
         if record_number == 5 {
             // MFT 根目录
@@ -397,8 +399,17 @@ fn build_tree_from_usn(
                         let child_path = current_path.join(&child_rec.file_name);
 
                         if child_rec.is_directory {
+                            // 环检测：同一记录号只允许建树一次
+                            if !visited.insert(child_ref) {
+                                tracing::debug!(
+                                    target: "treesize::usn",
+                                    "跳过重复访问的目录记录 {}（父指针环或硬链接）",
+                                    child_ref
+                                );
+                                continue;
+                            }
                             if let Some(child_node) =
-                                build_recursive(child_ref, parent_index, best_entries, size_map, &child_path)
+                                build_recursive(child_ref, parent_index, best_entries, size_map, &child_path, visited)
                             {
                                 child_nodes.push(child_node);
                             }
@@ -426,8 +437,17 @@ fn build_tree_from_usn(
                         let child_path = current_path.join(&child_rec.file_name);
 
                         if child_rec.is_directory {
+                            // 环检测：同一记录号只允许建树一次
+                            if !visited.insert(child_ref) {
+                                tracing::debug!(
+                                    target: "treesize::usn",
+                                    "跳过重复访问的目录记录 {}（父指针环或硬链接）",
+                                    child_ref
+                                );
+                                continue;
+                            }
                             if let Some(child_node) =
-                                build_recursive(child_ref, parent_index, best_entries, size_map, &child_path)
+                                build_recursive(child_ref, parent_index, best_entries, size_map, &child_path, visited)
                             {
                                 child_nodes.push(child_node);
                             }
@@ -443,8 +463,10 @@ fn build_tree_from_usn(
         }
     }
 
+    let mut visited: HashSet<u64> = HashSet::new();
+    visited.insert(5);
     let mut root_node = stacker::maybe_grow(64 * 1024, 256 * 1024 * 1024, || {
-        build_recursive(5, &parent_index, &best_entries, size_map, root_path)
+        build_recursive(5, &parent_index, &best_entries, size_map, root_path, &mut visited)
     })
     .unwrap_or_else(|| FileNode::new_dir(root_path.to_path_buf(), None));
 

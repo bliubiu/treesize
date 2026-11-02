@@ -5,7 +5,7 @@
 
 #![cfg(target_os = "windows")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -227,6 +227,7 @@ fn classify_mft_error(err: &NtfsError) -> (&'static str, String) {
 /// 从 MFT 条目列表重建 FileNode 树
 ///
 /// 使用 HashMap 建立父子关系索引，从根（记录 5）开始递归构建子树。
+/// 通过 visited 集合保证每个记录号只建树一次，防御父指针环。
 fn rebuild_tree(
     entries: Vec<MftFileEntry>,
     root_path: &Path,
@@ -248,31 +249,44 @@ fn rebuild_tree(
         min_size: u64,
         exclude_dirs: &[String],
         exclude_exts: &[String],
+        visited: &mut HashSet<u64>,
     ) -> FileNode {
-        let children = parent_index.get(&record_number);
-        let mut node = FileNode::new_dir(current_path.to_path_buf(), None);
+    let children = parent_index.get(&record_number);
+    let mut node = FileNode::new_dir(current_path.to_path_buf(), None);
 
-        if let Some(child_entries) = children {
-            let mut child_nodes: Vec<FileNode> = Vec::with_capacity(child_entries.len());
+    if let Some(child_entries) = children {
+        let mut child_nodes: Vec<FileNode> = Vec::with_capacity(child_entries.len());
 
-            for entry in child_entries {
-                let child_path = current_path.join(&entry.name);
+        for entry in child_entries {
+            let child_path = current_path.join(&entry.name);
 
-                // 排除过滤（目录名、扩展名）
-                if should_exclude_entry(&entry.name, entry.is_directory, exclude_dirs, exclude_exts) {
+            // 排除过滤（目录名、扩展名）
+            if should_exclude_entry(&entry.name, entry.is_directory, exclude_dirs, exclude_exts) {
+                continue;
+            }
+
+            if entry.is_directory {
+                // 环检测：同一记录号只允许建树一次。
+                // MFT 中损坏或硬链接父指针可能形成 自引用 / A→B→A 环，
+                // 无检测会无限递归导致内存暴涨（stacker 只防栈溢出，防不住堆分配）。
+                if !visited.insert(entry.record_number) {
+                    tracing::debug!(
+                        target: "treesize::mft",
+                        "跳过重复访问的目录记录 {}（父指针环或硬链接）",
+                        entry.record_number
+                    );
                     continue;
                 }
-
-                if entry.is_directory {
-                    // 递归构建子目录
-                    let child = build_recursive(
-                        entry.record_number,
-                        parent_index,
-                        &child_path,
-                        min_size,
-                        exclude_dirs,
-                        exclude_exts,
-                    );
+                // 递归构建子目录
+                let child = build_recursive(
+                    entry.record_number,
+                    parent_index,
+                    &child_path,
+                    min_size,
+                    exclude_dirs,
+                    exclude_exts,
+                    visited,
+                );
 
                     // 更新第一级子目录的文件计数
                     // 实际上 aggregate() 会在外层统一调用
@@ -291,7 +305,9 @@ fn rebuild_tree(
         node
     }
 
-    // 根记录号固定为 5
+    // 根记录号固定为 5；根只处理一次，防止 parent==5 的自引用条目形成环
+    let mut visited: HashSet<u64> = HashSet::new();
+    visited.insert(5);
     let mut root_node = stacker::maybe_grow(64 * 1024, 256 * 1024 * 1024, || {
         build_recursive(
             5,
@@ -300,6 +316,7 @@ fn rebuild_tree(
             options.min_size,
             &options.exclude_dirs,
             &options.exclude_exts,
+            &mut visited,
         )
     });
 
@@ -331,5 +348,51 @@ mod tests {
         assert!(node.is_dir());
         assert!(node.file_count > 0);
         assert!(node.size.0 > 0);
+    }
+
+    /// MFT 父指针环（自引用 + 回指根）不得触发无限递归。
+    ///
+    /// 数据形态：A(记录10, 父5) → B(记录20, 父10) → 伪造的记录5(父20)，
+    /// 构成 5→A→B→5 的引用环。修复前 build_recursive 会无限递归导致内存暴涨。
+    #[test]
+    fn rebuild_tree_breaks_parent_cycles() {
+        let entries = vec![
+            MftFileEntry {
+                record_number: 10,
+                is_directory: true,
+                name: "A".to_string(),
+                parent_record: 5,
+                size: 0,
+            },
+            MftFileEntry {
+                record_number: 20,
+                is_directory: true,
+                name: "B".to_string(),
+                parent_record: 10,
+                size: 0,
+            },
+            // 伪造：父指针指向根记录 5，与根入口形成环
+            MftFileEntry {
+                record_number: 5,
+                is_directory: true,
+                name: "EVIL".to_string(),
+                parent_record: 20,
+                size: 0,
+            },
+        ];
+        let options = ScanOptions::default();
+        let root_node = rebuild_tree(entries, &PathBuf::from("C:\\"), &options, None, None)
+            .expect("重建树失败");
+
+        // 根的直接子目录只有 A；EVIL（记录5）被环检测跳过，B 下无子节点
+        assert_eq!(root_node.children.len(), 1);
+        let a = &root_node.children[0];
+        assert_eq!(a.name, "A");
+        assert_eq!(a.children.len(), 1);
+        let b = &a.children[0];
+        assert_eq!(b.name, "B");
+        assert!(b.children.is_empty(), "回指根的 EVIL 记录应被环检测跳过");
+        assert_eq!(root_node.dir_count, 2);
+        assert_eq!(root_node.file_count, 0);
     }
 }

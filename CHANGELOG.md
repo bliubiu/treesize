@@ -73,6 +73,13 @@
   - `mft_scanner::rebuild_tree` 与 `usn_scanner::build_tree_from_usn` 使用 `stacker::maybe_grow`（red_zone 64 KB，stack_size 256 MB）扩栈防护
   - 新增依赖 `stacker = "0.1"`
 - **目录大小递归（工具函数）改为迭代 DFS，消除潜在栈溢出**（`app.rs::dir_size_recursive`）
+- **MFT/USN 树构建在父指针环上无限递归导致内存暴涨（GUI 卡死，7 GB+ 持续增长）**
+  - MFT 记录的 `$FILE_NAME` 父指针未经校验，损坏或硬链接数据可形成
+    自引用 / `A→B→A` / 回指根的引用环；`build_recursive` 无环检测，
+    无限递归不断分配 `FileNode`（`stacker::maybe_grow` 只防栈溢出，防不住堆分配）
+  - 修复：`mft_scanner::rebuild_tree` 与 `usn_scanner::build_tree_from_usn`
+    增加 visited 集合，同一记录号只允许建树一次，命中时 DEBUG 日志标明
+  - 新增单元测试 `rebuild_tree_breaks_parent_cycles`（自引用 + 回指根数据）
 - **`cargo build --release` 编译警告清零**
   - `egui::Stroke::new(1.0, ...)` 等 16 处浮点字面量补上显式 `f32` 类型，
     消除 `float_literal_f32_fallback` 警告
