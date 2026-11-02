@@ -132,6 +132,9 @@ fn do_mft_scan(
         parsed_records.len(),
     );
 
+    // 尽早释放 1.67GB 的 MFT 原始缓冲区（后续阶段不再需要）
+    drop(raw_data);
+
     if let Some(c) = cancel {
         if c.is_cancelled() {
             return Err(DomainError::ScanCancelled);
@@ -147,6 +150,9 @@ fn do_mft_scan(
         );
         DomainError::ScanFailed(format!("构建 MFT 树失败：{e}"))
     })?;
+
+    // 尽早释放 135 万条解析记录（条目已生成，后续阶段不再需要，约数百 MB）
+    drop(parsed_records);
 
     tracing::info!(
         target: "treesize::mft",

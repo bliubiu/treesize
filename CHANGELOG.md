@@ -107,6 +107,17 @@
     消除 `float_literal_f32_fallback` 警告
     （涉及 `theme.rs` / `widgets.rs` / `treemap.rs` / `sunburst.rs` /
     `render/trend.rs` / `render/dashboard.rs`；该警告在未来 Rust 版本将升级为硬错误）
+- **GUI 全卷扫描慢 + 内存高（C:\ 扫描实测根因与修复）**
+  - *CPU 争抢：解析被拖慢 65 倍。* 第一轮扫描完成后 GUI 的缓存计算线程
+    （Dashboard 页含 `DuplicateService` 哈希）立即启动，与第二轮扫描共用
+    全局 rayon 线程池：MFT 解析（纯内存）从 0.4s（`C:\Apps` 实测）被拖到
+    25.6s，且哈希读盘与 MFT 读取争抢磁盘 I/O。**改法**：扫描运行期间
+    `refresh_cache` 直接返回，不基于旧树启动计算（旧结果在扫描完成后
+    因代次变化作废，本就是无效计算）。
+  - *内存：大缓冲区持有到底。* 1.67 GB 的 MFT 原始缓冲区与 135 万条
+    解析结果一直持有到 `scan()` 返回。**改法**：解析完成后立即
+    `drop(raw_data)`，条目生成后立即 `drop(parsed_records)`，
+    树构建阶段的常驻内存减少约 2 GB。
 
 ### 已知问题
 

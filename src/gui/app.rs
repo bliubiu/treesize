@@ -968,7 +968,11 @@ impl TreeSizeApp {
     }
 
     fn refresh_cache(&mut self, snapshot: &Snapshot) {
-        if snapshot.node.is_none() {
+        // 扫描运行期间不启动缓存计算：
+        // 1) 计算基于旧树，扫描完成后代次变化即作废，纯浪费 CPU/磁盘；
+        // 2) 重复文件服务的哈希与扫描争抢全局 rayon 线程池与磁盘，
+        //    曾把 MFT 解析从 0.4s 拖慢到 25.6s。
+        if snapshot.node.is_none() || snapshot.running {
             return;
         }
 
