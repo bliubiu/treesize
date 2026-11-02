@@ -80,6 +80,28 @@
   - 修复：`mft_scanner::rebuild_tree` 与 `usn_scanner::build_tree_from_usn`
     增加 visited 集合，同一记录号只允许建树一次，命中时 DEBUG 日志标明
   - 新增单元测试 `rebuild_tree_breaks_parent_cycles`（自引用 + 回指根数据）
+- **MFT 直读引擎数据缺失/整树错位（CLI/GUI 双引擎口径对账修复，4 个根因）**
+  - *根因 1：$MFT 多 extent 读取错误。* `$MFT` 在 NTFS 上由多个非连续
+    extent 组成（实测本机 7 个 extent），旧实现按固定字节偏移一次连续读，
+    89% 的“记录”读到的是其他数据区（1,636,608 条原始记录里只有 17.7 万条
+    魔数合法）。**改法**：解析 `$MFT` 记录 0 的 `$DATA` runlist
+    （mapping pairs，含符号扩展的 LCN 解码），按 extent 逐段读取按 VCN 装配。
+    修复后有效记录从 178,430 → **1,343,567**（7.5 倍）。
+  - *根因 2：MFT 记录号误读。* `FILE_RECORD_SEGMENT_HEADER` 头部没有记录号，
+    旧代码把 0x2C-0x2F 当记录号读取，父子关系索引全错、子树展开失败。
+    **改法**：记录号由调用方按 $MFT 块序号（chunk 索引）传参提供。
+  - *根因 3：扫描根被忽略。* `rebuild_tree` 固定从卷根（记录 5）建树，
+    扫描 `C:\Apps` 返回整卷数据。**改法**：沿路径逐级匹配目录名
+    （Windows 大小写不敏感）定位扫描根记录号，仅构建该子树；
+    根不在元数据中时报错回落 Fs 引擎而非返回整卷。
+  - *根因 4：大小口径不一致。* MFT 之前取 `$DATA` 真实长度（逻辑长度），
+    与 Fs 引擎默认的分配大小（占用空间）不对齐。**改法**：同时解析
+    非驻留 `$DATA` 头 0x28（分配大小）与 0x30（真实长度），
+    按 `--apparent-size` 选择，MFT/USN 与 Fs 口径一致。
+  - 端到端对账（提权 CLI，`C:\Apps\baidu`）：
+    文件数/目录数与 Fs 引擎完全一致（3,854 文件 / 351 目录）；
+    大小差异 ~3%（MFT `$DATA` allocated 字段与 API AllocationSize
+    在压缩/稀疏文件上的口径差，记录为后续调优项）。
 - **`cargo build --release` 编译警告清零**
   - `egui::Stroke::new(1.0, ...)` 等 16 处浮点字面量补上显式 `f32` 类型，
     消除 `float_literal_f32_fallback` 警告

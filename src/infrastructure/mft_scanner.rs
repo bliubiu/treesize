@@ -139,7 +139,7 @@ fn do_mft_scan(
     }
 
     // 构建文件树
-    let entries = build_tree(&parsed_records).map_err(|e| {
+    let entries = build_tree(&parsed_records, options.apparent_size).map_err(|e| {
         tracing::error!(
             target: "treesize::mft",
             "构建 MFT 树失败: 有效记录数={}, error={e}",
@@ -224,9 +224,33 @@ fn classify_mft_error(err: &NtfsError) -> (&'static str, String) {
     }
 }
 
+/// 沿扫描根路径解析 MFT 记录号
+///
+/// NTFS 根目录固定为记录 5。非卷根路径（如 `C:\Apps`）从记录 5 开始，
+/// 逐级在 parent 索引中按目录名匹配（Windows 不区分大小写），
+/// 返回扫描根对应的记录号；路径与元数据不符时返回 None。
+fn resolve_scan_root_record(
+    parent_index: &HashMap<u64, Vec<MftFileEntry>>,
+    root_path: &Path,
+) -> Option<u64> {
+    let mut current = 5u64;
+    for comp in root_path.components() {
+        if let std::path::Component::Normal(name) = comp {
+            let name = name.to_string_lossy();
+            let candidates = parent_index.get(&current)?;
+            let matched = candidates.iter().find(|e| {
+                e.is_directory && e.name.eq_ignore_ascii_case(name.as_ref())
+            })?;
+            current = matched.record_number;
+        }
+    }
+    Some(current)
+}
+
 /// 从 MFT 条目列表重建 FileNode 树
 ///
-/// 使用 HashMap 建立父子关系索引，从根（记录 5）开始递归构建子树。
+/// 使用 HashMap 建立父子关系索引，从扫描根对应的记录号为起点递归构建子树
+/// （路径在元数据中无法定位时按既有约定报错，由外层回落 Fs 引擎）。
 /// 通过 visited 集合保证每个记录号只建树一次，防御父指针环。
 fn rebuild_tree(
     entries: Vec<MftFileEntry>,
@@ -241,7 +265,27 @@ fn rebuild_tree(
         parent_index.entry(entry.parent_record).or_default().push(entry);
     }
 
-    // 步骤 2：从根开始递归构建树
+    // 步骤 1.5：定位扫描根对应的 MFT 记录号（卷根固定为记录 5）
+    let root_record = resolve_scan_root_record(&parent_index, root_path).ok_or_else(|| {
+        tracing::warn!(
+            target: "treesize::mft",
+            "扫描根不在卷元数据中，无法用 MFT 引擎定位：{}",
+            root_path.display()
+        );
+        DomainError::ScanFailed(format!(
+            "MFT 引擎无法在卷元数据中定位扫描根 {}（目录可能已移动、被排除或属于硬链接别名），已按 MFT 失败处理",
+            root_path.display()
+        ))
+    })?;
+    tracing::debug!(
+        target: "treesize::mft",
+        "扫描根 {} → MFT 记录号 {}（直接子项 {}）",
+        root_path.display(),
+        root_record,
+        parent_index.get(&root_record).map_or(0, |v| v.len()),
+    );
+
+    // 步骤 2：从扫描根记录开始递归构建树
     fn build_recursive(
         record_number: u64,
         parent_index: &HashMap<u64, Vec<MftFileEntry>>,
@@ -305,12 +349,12 @@ fn rebuild_tree(
         node
     }
 
-    // 根记录号固定为 5；根只处理一次，防止 parent==5 的自引用条目形成环
+    // 根记录只处理一次，防止自引用条目形成环
     let mut visited: HashSet<u64> = HashSet::new();
-    visited.insert(5);
+    visited.insert(root_record);
     let mut root_node = stacker::maybe_grow(64 * 1024, 256 * 1024 * 1024, || {
         build_recursive(
-            5,
+            root_record,
             &parent_index,
             root_path,
             options.min_size,
@@ -394,5 +438,73 @@ mod tests {
         assert!(b.children.is_empty(), "回指根的 EVIL 记录应被环检测跳过");
         assert_eq!(root_node.dir_count, 2);
         assert_eq!(root_node.file_count, 0);
+    }
+
+    /// 扫描根不能是卷根（记录 5）：必须沿路径定位到子树记录，
+    /// 否则扫描 C:\Apps 会返回整卷数据。
+    #[test]
+    fn rebuild_tree_uses_scan_root_subtree() {
+        let entries = vec![
+            MftFileEntry {
+                record_number: 10,
+                is_directory: true,
+                name: "Apps".to_string(),
+                parent_record: 5,
+                size: 0,
+            },
+            MftFileEntry {
+                record_number: 11,
+                is_directory: true,
+                name: "sub".to_string(),
+                parent_record: 10,
+                size: 0,
+            },
+            // 卷根下的其他目录，不得出现在 C:\Apps 的结果里
+            MftFileEntry {
+                record_number: 12,
+                is_directory: true,
+                name: "other".to_string(),
+                parent_record: 5,
+                size: 0,
+            },
+        ];
+        let options = ScanOptions::default();
+        let root_node = rebuild_tree(
+            entries,
+            &PathBuf::from("C:\\Apps"),
+            &options,
+            None,
+            None,
+        )
+        .expect("重建树失败");
+
+        // 结果只包含 Apps 子树：sub 在内，other 在外
+        assert_eq!(root_node.children.len(), 1);
+        let sub = &root_node.children[0];
+        assert_eq!(sub.name, "sub");
+        assert!(sub.children.is_empty());
+        assert_eq!(root_node.dir_count, 1);
+        assert_eq!(root_node.file_count, 0);
+    }
+
+    /// 扫描根在元数据中不存在时报错（触发 GUI 侧回落 Fs 引擎），而非返回整卷数据。
+    #[test]
+    fn rebuild_tree_rejects_missing_scan_root() {
+        let entries = vec![MftFileEntry {
+            record_number: 10,
+            is_directory: true,
+            name: "Apps".to_string(),
+            parent_record: 5,
+            size: 0,
+        }];
+        let options = ScanOptions::default();
+        let result = rebuild_tree(
+            entries,
+            &PathBuf::from("C:\\NoSuchDir"),
+            &options,
+            None,
+            None,
+        );
+        assert!(result.is_err(), "不存在的扫描根应报错而非回落整卷");
     }
 }

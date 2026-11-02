@@ -106,6 +106,8 @@ pub enum NtfsError {
     InvalidFileNameUtf16,
     #[error("NTFS I/O 错误：{0}")]
     Io(#[from] std::io::Error),
+    #[error("NTFS 结构解码错误：{0}")]
+    IndependentDecode(String),
     /// MFT 起始 LCN 计算出的字节偏移为 0（lcn 负值/乘法溢出/元数据损坏）
     #[error("MFT 字节偏移无效: lcn={lcn}, cluster_size={cluster_size}, byte_offset={byte_offset:#x}")]
     MftInvalidOffset {
@@ -425,76 +427,200 @@ pub fn path_to_volume_device(path: &Path) -> OsString {
 // ─── MFT 原始数据读取 ──────────────────────────────────────────────────────
 
 pub fn read_mft_raw(handle: &VolumeHandle, vol: &VolumeInfo, max_records: u64) -> NtfsResult<Vec<u8>> {
-    let total = (max_records * vol.bytes_per_record as u64).min(vol.mft_max_bytes());
-    if total == 0 {
+    let cluster_size = vol.bytes_per_cluster();
+    let rec_bytes = vol.bytes_per_record as u64;
+    let total_records = max_records.min(vol.mft_valid_data_length.max(0) as u64 / rec_bytes);
+    let wanted = total_records * rec_bytes;
+    if wanted == 0 {
         return Ok(Vec::new());
     }
 
-    let offset = vol.mft_byte_offset();
+    tracing::debug!(
+        target: "treesize::ntfs",
+        "read_mft_raw: max_records={}, total={}, cluster_size={}, lcn={}",
+        max_records,
+        wanted,
+        cluster_size,
+        vol.mft_start_lcn,
+    );
+
+    // 1) 读取 $MFT 首记录（记录 0，$MFT 本身）以获得其 $DATA runlist。
+    //    $MFT 在 NTFS 上通常由多个非连续 extent 组成，
+    //    不能按固定字节偏移一次连续读取（旧实现把 extent 后的其他数据当 MFT 记录解析，
+    //    造成大量“非法魔数”与记录缺失）。
+    let first_offset = vol.mft_byte_offset();
+    if first_offset == 0 {
+        return Err(NtfsError::MftInvalidOffset {
+            lcn: vol.mft_start_lcn,
+            cluster_size,
+            byte_offset: first_offset,
+        });
+    }
+    let mut head = vec![0u8; cluster_size as usize];
+    read_volume_span(handle, first_offset, &mut head)?;
+
+    // 2) 记录 0 应用 USA fixup 后解析属性表
+    let usa_off = u16::from_le_bytes([head[4], head[5]]);
+    let usa_cnt = u16::from_le_bytes([head[6], head[7]]);
+    apply_fixup(&mut head, usa_off, usa_cnt, 512);
+    let runlist = extract_mft_runlist(&head, rec_bytes as usize)?;
 
     tracing::debug!(
         target: "treesize::ntfs",
-        "read_mft_raw: max_records={}, total={}, offset={:#x}, lcn={}, cluster_size={}",
-        max_records,
-        total,
-        offset,
-        vol.mft_start_lcn,
-        vol.bytes_per_cluster(),
+        "read_mft_raw: runlist extents={}, spans={:?}",
+        runlist.len(),
+        runlist.iter().map(|(v, l, c)| (v, l, c)).take(8).collect::<Vec<_>>(),
     );
 
-    if offset == 0 {
-        tracing::error!(
-            target: "treesize::ntfs",
-            "MFT 字节偏移无效: {}",
-            vol.debug_lcn(),
-        );
-        return Err(NtfsError::MftInvalidOffset {
-            lcn: vol.mft_start_lcn,
-            cluster_size: vol.bytes_per_cluster(),
-            byte_offset: offset,
-        });
+    // 3) 按 runlist 逐 extent 读取，按 VCN 落位装配
+    let mut buf = vec![0u8; wanted as usize];
+    for (start_vcn, span, start_lcn) in &runlist {
+        let src_offset = (*start_lcn as u64) * cluster_size;
+        let dst_offset = start_vcn * cluster_size;
+        let src_len = span * cluster_size;
+        if src_offset == 0 && *start_lcn != 0 {
+            continue; // LCN 溢出成 0 的坏项，跳过
+        }
+        let end = (dst_offset + src_len).min(wanted);
+        if dst_offset >= wanted {
+            continue; // 目标区间已满
+        }
+        let take = (end - dst_offset) as usize;
+        read_volume_span(handle, src_offset, &mut buf[dst_offset as usize..dst_offset as usize + take])?;
     }
+    Ok(buf)
+}
 
-    let mut buf = vec![0u8; total as usize];
-    let mut read: u32 = 0;
+/// 单次整段读卷（自动处理长读分片与 0 进度）
+fn read_volume_span(handle: &VolumeHandle, offset: u64, buf: &mut [u8]) -> NtfsResult<()> {
+    if buf.is_empty() {
+        return Ok(());
+    }
     unsafe {
         if SetFilePointerEx(handle.raw(), offset as i64, std::ptr::null_mut(), 0) == 0 {
-            let err_code = GetLastError();
-            tracing::error!(
-                target: "treesize::ntfs",
-                "MFT 定位失败: offset={:#x}, total={}, error_code={}, {}",
-                offset, total, err_code, vol.debug_lcn(),
-            );
+            let code = GetLastError();
             return Err(NtfsError::MftSeekError {
                 offset,
-                lcn: vol.mft_start_lcn,
-                cluster_size: vol.bytes_per_cluster(),
-                code: err_code,
+                lcn: 0,
+                cluster_size: 0,
+                code,
             });
         }
-        if ReadFile(
-            handle.raw(),
-            buf.as_mut_ptr(),
-            total as u32,
-            &mut read,
-            std::ptr::null_mut(),
-        ) == 0
-        {
-            let err_code = GetLastError();
-            tracing::error!(
-                target: "treesize::ntfs",
-                "MFT 读取失败: offset={:#x}, expected_bytes={}, actual_read={}, error_code={}, {}",
-                offset, total, read, err_code, vol.debug_lcn(),
-            );
-            return Err(NtfsError::MftReadError {
-                offset,
-                expected: total,
-                code: err_code,
-            });
+        let mut done = 0usize;
+        while done < buf.len() {
+            let want = (buf.len() - done).min(0x1000_0000) as u32; // 256 MB 分片上限
+            let mut got: u32 = 0;
+            if ReadFile(
+                handle.raw(),
+                buf.as_mut_ptr().add(done),
+                want,
+                &mut got,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                let code = GetLastError();
+                return Err(NtfsError::MftReadError {
+                    offset: offset + done as u64,
+                    expected: (buf.len() - done) as u64,
+                    code,
+                });
+            }
+            if got == 0 {
+                return Err(NtfsError::MftReadError {
+                    offset: offset + done as u64,
+                    expected: (buf.len() - done) as u64,
+                    code: 0,
+                });
+            }
+            done += got as usize;
         }
     }
-    buf.truncate(read as usize);
-    Ok(buf)
+    Ok(())
+}
+
+/// 从 `$MFT` 记录 0（先 USA fixup）的 `$DATA`（0x80，非驻留、无名）解析 runlist，
+/// 返回 `(逻辑起始VCN, 跨度VCN数, 起始LCN)` 有序序列，按逻辑序覆盖整个 $MFT。
+fn extract_mft_runlist(record0: &[u8], _record_size: usize) -> NtfsResult<Vec<(u64, u64, i64)>> {
+    let hdr = parse_record_header(record0, 0)?;
+    let data_type = 0x80; // $DATA
+    let mut off = hdr.attribute_offset as usize;
+    loop {
+        let parsed = parse_attr_header(record0, off)?;
+        let (ah, next) = match parsed {
+            Some(p) => p,
+            None => break,
+        };
+        if ah.type_code == data_type && ah.non_resident && ah.name_length == 0 {
+            // 非驻留属性头 64 字节：0x20 = runlist 相对偏移
+            if ah.total_length < 64 {
+                break;
+            }
+            let run_off =
+                off + u16::from_le_bytes([record0[off + 32], record0[off + 33]]) as usize;
+            let attr_end = off + ah.total_length as usize;
+            return parse_runlist(record0, run_off, attr_end);
+        }
+        if next <= off {
+            break; // 防守：属性长度不再前进
+        }
+        off = next;
+    }
+    Err(NtfsError::IndependentDecode("未能定位 $MFT 的 $DATA runlist".to_string()))
+}
+
+/// 解析 NTFS runlist（mapping pairs）
+fn parse_runlist(data: &[u8], start: usize, end: usize) -> NtfsResult<Vec<(u64, u64, i64)>> {
+    let mut runs: Vec<(u64, u64, i64)> = Vec::new();
+    let mut prev_lcn: i64 = 0;
+    let mut prev_vcn: u64 = 0;
+    let mut off = start;
+    while off < end {
+        let hdr = data[off];
+        if hdr == 0 {
+            break; // runlist 结束符
+        }
+        let len_field = (hdr & 0x0F) as usize;
+        let off_field = (hdr >> 4) as usize;
+        if len_field == 0 || len_field > 8 || off_field > 8 {
+            return Err(NtfsError::IndependentDecode(format!(
+                "runlist 头异常：{} @ {}",
+                hdr, off
+            )));
+        }
+        let base = off + 1;
+        if base + len_field > end {
+            break;
+        }
+        let mut span: u64 = 0;
+        for i in 0..len_field {
+            span |= u64::from(data[base + i]) << (8 * i);
+        }
+        let mut lcn: i64 = 0;
+        if off_field > 0 {
+            if base + len_field + off_field > end {
+                break;
+            }
+            let mut raw: u64 = 0;
+            for i in 0..off_field {
+                raw |= u64::from(data[base + len_field + i]) << (8 * i);
+            }
+            let bits = 8 * off_field as u32;
+            if bits < 64 && (raw & (1u64 << (bits - 1))) != 0 {
+                raw |= u64::MAX << bits; // 符号扩展
+            }
+            lcn = raw as i64;
+        }
+        if span > 0 {
+            runs.push((prev_vcn, span, prev_lcn + lcn));
+            prev_lcn += lcn;
+            prev_vcn += span;
+        }
+        off = base + len_field + off_field;
+    }
+    if runs.is_empty() {
+        return Err(NtfsError::IndependentDecode("runlist 为空".to_string()));
+    }
+    Ok(runs)
 }
 
 // ─── MFT 记录解析 ──────────────────────────────────────────────────────────
@@ -512,7 +638,12 @@ pub struct MftRecordHeader {
     pub usa_count: u16,
 }
 
-pub fn parse_record_header(data: &[u8]) -> NtfsResult<MftRecordHeader> {
+/// 解析 MFT 记录头
+///
+/// **注意**：`FILE_RECORD_SEGMENT_HEADER` 头部本身没有记录号字段，
+/// `record_index` 必须由调用方按其在 $MFT 中的偏移序号提供
+/// （此前误读 0x2C-0x2F 字节，导致父子关系索引全错、子树大量丢失）。
+pub fn parse_record_header(data: &[u8], record_index: u64) -> NtfsResult<MftRecordHeader> {
     if data.len() < 48 {
         return Err(NtfsError::InsufficientData {
             needed: 48,
@@ -535,7 +666,7 @@ pub fn parse_record_header(data: &[u8]) -> NtfsResult<MftRecordHeader> {
         is_in_use: (flags & 0x01) != 0,
         is_directory: (flags & 0x02) != 0,
         bytes_in_use: u32::from_le_bytes([data[24], data[25], data[26], data[27]]),
-        record_number: u32::from_le_bytes([data[44], data[45], data[46], data[47]]) as u64,
+        record_number: record_index,
     })
 }
 
@@ -669,10 +800,12 @@ pub struct ParsedMftRecord {
     pub header: MftRecordHeader,
     pub file_names: Vec<FileNameAttr>,
     pub data_real_size: Option<u64>,
+    /// 分配大小（占用空间，非驻留 $DATA 头 0x28）；与 Fs 引擎默认口径一致
+    pub data_allocated_size: Option<u64>,
 }
 
-pub fn parse_mft_record(data: &[u8]) -> NtfsResult<Option<ParsedMftRecord>> {
-    let header = match parse_record_header(data) {
+pub fn parse_mft_record(data: &[u8], record_index: u64) -> NtfsResult<Option<ParsedMftRecord>> {
+    let header = match parse_record_header(data, record_index) {
         Ok(h) => h,
         Err(NtfsError::InvalidMftMagic { .. }) => return Ok(None),
         Err(e) => return Err(e),
@@ -690,6 +823,7 @@ pub fn parse_mft_record(data: &[u8]) -> NtfsResult<Option<ParsedMftRecord>> {
         header,
         file_names: Vec::new(),
         data_real_size: None,
+        data_allocated_size: None,
     };
 
     let mut off = result.header.attribute_offset as usize;
@@ -714,6 +848,9 @@ pub fn parse_mft_record(data: &[u8]) -> NtfsResult<Option<ParsedMftRecord>> {
             },
             Some(AttributeType::Data) if ah.non_resident => {
                 if ah.total_length >= 64 {
+                    // 非驻留 $DATA 头：0x28 = 分配大小（占用空间），0x30 = 真实长度
+                    let alloc = u64::from_le_bytes(rec[attr_body_start + 40..attr_body_start + 48].try_into().unwrap());
+                    result.data_allocated_size = Some(alloc);
                     let rs = u64::from_le_bytes(rec[attr_body_start + 48..attr_body_start + 56].try_into().unwrap());
                     result.data_real_size = Some(rs);
                 }
@@ -734,8 +871,8 @@ pub fn parse_mft_record(data: &[u8]) -> NtfsResult<Option<ParsedMftRecord>> {
 ///
 /// 与 `parse_mft_record` 功能相同，但 fixup 直接在输入切片上执行，
 /// 省去每次 1KB 的堆分配。被 `parse_mft_records` 内部调用。
-fn parse_mft_record_mut(data: &mut [u8]) -> NtfsResult<Option<ParsedMftRecord>> {
-    let header = match parse_record_header(data) {
+fn parse_mft_record_mut(data: &mut [u8], record_index: u64) -> NtfsResult<Option<ParsedMftRecord>> {
+    let header = match parse_record_header(data, record_index) {
         Ok(h) => h,
         Err(NtfsError::InvalidMftMagic { .. }) => return Ok(None),
         Err(e) => return Err(e),
@@ -753,6 +890,7 @@ fn parse_mft_record_mut(data: &mut [u8]) -> NtfsResult<Option<ParsedMftRecord>> 
         header,
         file_names: Vec::new(),
         data_real_size: None,
+        data_allocated_size: None,
     };
 
     let mut off = result.header.attribute_offset as usize;
@@ -777,6 +915,9 @@ fn parse_mft_record_mut(data: &mut [u8]) -> NtfsResult<Option<ParsedMftRecord>> 
             },
             Some(AttributeType::Data) if ah.non_resident => {
                 if ah.total_length >= 64 {
+                    // 非驻留 $DATA 头：0x28 = 分配大小（占用空间），0x30 = 真实长度
+                    let alloc = u64::from_le_bytes(data[attr_body_start + 40..attr_body_start + 48].try_into().unwrap());
+                    result.data_allocated_size = Some(alloc);
                     let rs = u64::from_le_bytes(data[attr_body_start + 48..attr_body_start + 56].try_into().unwrap());
                     result.data_real_size = Some(rs);
                 }
@@ -805,18 +946,43 @@ pub fn parse_mft_records(raw: &mut [u8], bpr: u32) -> NtfsResult<Vec<ParsedMftRe
         return Ok(Vec::new());
     }
 
+    let ok_total = std::sync::atomic::AtomicUsize::new(0);
+    let no_name_total = std::sync::atomic::AtomicUsize::new(0);
+    let err_total = std::sync::atomic::AtomicUsize::new(0);
+
     let out: Vec<ParsedMftRecord> = raw
         .par_chunks_mut(rs)
         .take(n)
-        .filter_map(|chunk| match parse_mft_record_mut(chunk) {
-            Ok(Some(r)) => Some(r),
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(target: "treesize::ntfs", "MFT 记录解析跳过：{e}");
-                None
-            },
+        .enumerate()
+        .filter_map(|(idx, chunk)| {
+            use std::sync::atomic::Ordering::Relaxed;
+            // 记录号 = 该记录在 $MFT 中的 1 KiB 块序号（索引传参，不再从头部误读）
+            match parse_mft_record_mut(chunk, idx as u64) {
+                Ok(Some(r)) => {
+                    ok_total.fetch_add(1, Relaxed);
+                    if r.file_names.is_empty() {
+                        no_name_total.fetch_add(1, Relaxed);
+                    }
+                    Some(r)
+                },
+                Ok(None) => None,
+                Err(e) => {
+                    err_total.fetch_add(1, Relaxed);
+                    tracing::debug!(target: "treesize::ntfs", "MFT 记录解析跳过：{e}");
+                    None
+                },
+            }
         })
         .collect();
+
+    tracing::info!(
+        target: "treesize::ntfs",
+        "MFT 解析统计：原始记录={} in-use有效={} 其中无$FILE_NAME={} 解析失败={}",
+        n,
+        ok_total.load(std::sync::atomic::Ordering::Relaxed),
+        no_name_total.load(std::sync::atomic::Ordering::Relaxed),
+        err_total.load(std::sync::atomic::Ordering::Relaxed),
+    );
 
     Ok(out)
 }
@@ -828,11 +994,28 @@ pub fn parse_mft_records(raw: &mut [u8], bpr: u32) -> NtfsResult<Vec<ParsedMftRe
 /// 用于 USN 扫描器：USN Journal 记录不包含文件大小信息，
 /// 需要读取 MFT 来获取每个文件的实际大小。
 /// key = MFT 记录号, value = 文件大小（字节）
-pub fn build_size_map(parsed: &[ParsedMftRecord]) -> std::collections::HashMap<u64, u64> {
+///
+/// `apparent_size = true` 取真实长度（$DATA 0x30），
+/// 默认取分配大小（$DATA 0x28，占用空间，与 Fs 引擎口径一致）。
+pub fn build_size_map(
+    parsed: &[ParsedMftRecord],
+    apparent_size: bool,
+) -> std::collections::HashMap<u64, u64> {
     parsed
         .iter()
-        .map(|rec| (rec.header.record_number, rec.data_real_size.unwrap_or(0)))
+        .map(|rec| (rec.header.record_number, select_record_size(rec, apparent_size)))
         .collect()
+}
+
+/// 按大小口径选择 MFT 记录的字节量：默认分配大小（占用空间），
+/// `apparent_size` 为真时用真实长度（逻辑长度）
+fn select_record_size(rec: &ParsedMftRecord, apparent_size: bool) -> u64 {
+    if apparent_size {
+        rec.data_real_size
+    } else {
+        rec.data_allocated_size.or(rec.data_real_size)
+    }
+    .unwrap_or(0)
 }
 
 // ─── MFT 条目与树构建 ──────────────────────────────────────────────────────
@@ -846,7 +1029,7 @@ pub struct MftFileEntry {
     pub size: u64,
 }
 
-pub fn build_tree(records: &[ParsedMftRecord]) -> NtfsResult<Vec<MftFileEntry>> {
+pub fn build_tree(records: &[ParsedMftRecord], apparent_size: bool) -> NtfsResult<Vec<MftFileEntry>> {
     let mut entries = Vec::with_capacity(records.len());
     for rec in records {
         let best = rec.file_names.iter().max_by_key(|n| match n.name_namespace {
@@ -857,7 +1040,7 @@ pub fn build_tree(records: &[ParsedMftRecord]) -> NtfsResult<Vec<MftFileEntry>> 
         });
         let name = best.map(|n| n.name.clone()).unwrap_or_default();
         let parent = best.map(|n| n.parent_record).unwrap_or(0);
-        let sz = rec.data_real_size.unwrap_or(0);
+        let sz = select_record_size(rec, apparent_size);
         entries.push(MftFileEntry {
             record_number: rec.header.record_number,
             is_directory: rec.header.is_directory,
@@ -1046,8 +1229,8 @@ mod tests {
         d[20..22].copy_from_slice(&[0x38, 0x00]);
         d[22..24].copy_from_slice(&[0x01, 0x00]);
         d[24..28].copy_from_slice(&1024u32.to_le_bytes());
-        d[44..48].copy_from_slice(&5u32.to_le_bytes());
-        let h = parse_record_header(&d).unwrap();
+        // 记录号由调用方按 $MFT 块序号提供，头部 0x2C-0x2F 不再误读
+        let h = parse_record_header(&d, 5).unwrap();
         assert!(h.is_in_use);
         assert_eq!(h.record_number, 5);
     }

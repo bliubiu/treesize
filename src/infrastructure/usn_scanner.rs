@@ -195,8 +195,8 @@ fn do_usn_scan(
     let parsed_mft = parse_mft_records(&mut raw_mft, volume_info.bytes_per_record)
         .map_err(|e| DomainError::ScanFailed(format!("解析 MFT 失败：{e}")))?;
 
-    // 构建 记录号→文件大小 映射表
-    let size_map = build_size_map(&parsed_mft);
+    // 构建 记录号→文件大小 映射表（口径与 Fs 引擎一致）
+    let size_map = build_size_map(&parsed_mft, options.apparent_size);
 
     let mft_record_count = parsed_mft.len();
     drop(parsed_mft); // 尽早释放 MFT 内存
