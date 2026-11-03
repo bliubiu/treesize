@@ -123,6 +123,16 @@
     **改法**：`DuplicateService` 哈希阶段（Stage 3 快速哈希、Stage 5 全量
     哈希）迁移到低并发专用线程池（一半核心、最多 4 线程），扫描运行期间
     不再与 MFT 解析争抢资源。
+- **MFT 引擎整卷统计虚增（约等于卷容量的一次性多算）**
+  - `$BadClus`（MFT 记录 8，坏簇容器）的非驻留 `$DATA` 流 `$BAD` 的
+    allocated/real size 字段恒等于**整卷容量**（本机 146.48 GiB），
+    大小解析照常计入，导致 MFT 引擎扫描 `C:\` 总量虚增一整卷
+    （245.48 GiB → 实际 99.00 GiB）。WizTree / Everything 等同类工具均排除该记录
+  - **改法**：`ntfs_reader` 定义 `BAD_CLUS_RECORD` 常量与 `is_bad_clus()`，
+    `parse_mft_record` / `parse_mft_record_mut` 的非驻留 `$DATA` 分支
+    对记录 8 跳过大小解析；条目本身保留（树中显示 0 B，与其他元文件一致）
+  - 提权复扫实测：总量 245.48 → **99.00 GiB**，
+    与 Fs 引擎口径（106.73 GiB 含权限错误目录缺口）对齐
 
 ### 已知问题
 

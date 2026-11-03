@@ -17,6 +17,11 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 // ─── 手动定义的 IOCTL／常量 ──────────────────────────────────────────────
 
 const FSCTL_GET_NTFS_VOLUME_DATA: u32 = 0x00090064;
+
+/// $BadClus 在 MFT 中的固定记录号。其 $BAD 数据流大小等于整个卷容量，
+/// 是坏簇映射表（元数据容器）而非真实文件数据，计入后会虚增统计，
+/// 与 WizTree / Everything 等业界工具口径一致，必须排除。
+const BAD_CLUS_RECORD: u64 = 8;
 const FSCTL_QUERY_USN_JOURNAL: u32 = 0x000900ec;
 /// `ERROR_ACCESS_DENIED`
 const ERROR_ACCESS_DENIED: u32 = 5;
@@ -804,6 +809,11 @@ pub struct ParsedMftRecord {
     pub data_allocated_size: Option<u64>,
 }
 
+/// 判断是否为 $BadClus（坏簇映射表）
+fn is_bad_clus(record_index: u64) -> bool {
+    record_index == BAD_CLUS_RECORD
+}
+
 pub fn parse_mft_record(data: &[u8], record_index: u64) -> NtfsResult<Option<ParsedMftRecord>> {
     let header = match parse_record_header(data, record_index) {
         Ok(h) => h,
@@ -847,7 +857,8 @@ pub fn parse_mft_record(data: &[u8], record_index: u64) -> NtfsResult<Option<Par
                 }
             },
             Some(AttributeType::Data) if ah.non_resident => {
-                if ah.total_length >= 64 {
+                // 排除 $BadClus：其 $BAD 流大小 = 整卷容量，非真实文件数据
+                if !is_bad_clus(record_index) && ah.total_length >= 64 {
                     // 非驻留 $DATA 头：0x28 = 分配大小（占用空间），0x30 = 真实长度
                     let alloc = u64::from_le_bytes(rec[attr_body_start + 40..attr_body_start + 48].try_into().unwrap());
                     result.data_allocated_size = Some(alloc);
@@ -914,7 +925,8 @@ fn parse_mft_record_mut(data: &mut [u8], record_index: u64) -> NtfsResult<Option
                 }
             },
             Some(AttributeType::Data) if ah.non_resident => {
-                if ah.total_length >= 64 {
+                // 排除 $BadClus：其 $BAD 流大小 = 整卷容量，非真实文件数据
+                if !is_bad_clus(record_index) && ah.total_length >= 64 {
                     // 非驻留 $DATA 头：0x28 = 分配大小（占用空间），0x30 = 真实长度
                     let alloc = u64::from_le_bytes(data[attr_body_start + 40..attr_body_start + 48].try_into().unwrap());
                     result.data_allocated_size = Some(alloc);
