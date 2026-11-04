@@ -14,8 +14,8 @@ use crate::domain::file_node::FileNode;
 use crate::domain::scan_engine::{should_exclude_entry, CancelToken, ScanEngine, ScanOptions, ScanProgress};
 
 use super::ntfs_reader::{
-    build_tree, get_volume_info, parse_mft_records, path_to_volume_device, read_mft_raw, MftFileEntry, NtfsError,
-    VolumeHandle,
+    build_tree, get_volume_info, parse_mft_records, path_to_volume_device, read_mft_raw,
+    resolve_nonresident_attr_lists, transfer_ext_data_sizes, MftFileEntry, NtfsError, VolumeHandle,
 };
 
 /// MFT 直接读取扫描引擎
@@ -116,7 +116,7 @@ fn do_mft_scan(
     }
 
     // 解析 MFT 记录
-    let parsed_records = parse_mft_records(&mut raw_data, volume_info.bytes_per_record).map_err(|e| {
+    let mut parsed_records = parse_mft_records(&mut raw_data, volume_info.bytes_per_record).map_err(|e| {
         tracing::error!(
             target: "treesize::mft",
             "解析 MFT 失败: raw_len={}, bpr={}, error={e}",
@@ -131,6 +131,11 @@ fn do_mft_scan(
         "解析 MFT 记录：{} 条有效记录",
         parsed_records.len(),
     );
+
+    // 二阶段解析：$ATTRIBUTE_LIST 非驻留时按 run 链回读并登记扩展记录引用
+    if resolve_nonresident_attr_lists(handle, &volume_info, &mut parsed_records) > 0 {
+        transfer_ext_data_sizes(&mut parsed_records);
+    }
 
     // 尽早释放 1.67GB 的 MFT 原始缓冲区（后续阶段不再需要）
     drop(raw_data);

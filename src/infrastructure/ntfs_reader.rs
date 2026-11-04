@@ -462,7 +462,7 @@ pub fn read_mft_raw(handle: &VolumeHandle, vol: &VolumeInfo, max_records: u64) -
         });
     }
     let mut head = vec![0u8; cluster_size as usize];
-    read_volume_span(handle, first_offset, &mut head)?;
+    read_volume_span(handle, first_offset, &mut head, vol.bytes_per_sector as u64)?;
 
     // 2) 记录 0 应用 USA fixup 后解析属性表
     let usa_off = u16::from_le_bytes([head[4], head[5]]);
@@ -491,13 +491,46 @@ pub fn read_mft_raw(handle: &VolumeHandle, vol: &VolumeInfo, max_records: u64) -
             continue; // 目标区间已满
         }
         let take = (end - dst_offset) as usize;
-        read_volume_span(handle, src_offset, &mut buf[dst_offset as usize..dst_offset as usize + take])?;
+        read_volume_span(
+            handle,
+            src_offset,
+            &mut buf[dst_offset as usize..dst_offset as usize + take],
+            vol.bytes_per_sector as u64,
+        )?;
     }
     Ok(buf)
 }
 
 /// 单次整段读卷（自动处理长读分片与 0 进度）
-fn read_volume_span(handle: &VolumeHandle, offset: u64, buf: &mut [u8]) -> NtfsResult<()> {
+///
+/// 卷设备句柄的 `ReadFile` 要求读取长度为扇区（`bytes_per_sector`）的倍数，
+/// 否则返回错误（诊断证据：所有失败读的长度均非 512 倍数）。
+/// 对齐请求走零拷贝快路径；非对齐请求整段填充至扇区倍数读取后回填。
+fn read_volume_span(
+    handle: &VolumeHandle,
+    offset: u64,
+    buf: &mut [u8],
+    sector: u64,
+) -> NtfsResult<()> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    let sector = if sector == 0 { 512 } else { sector };
+    if offset % sector == 0 && buf.len() as u64 % sector == 0 {
+        return read_volume_span_raw(handle, offset, buf);
+    }
+    // 非对齐读：起始/长度均补齐到扇区倍数，一次额外拷贝回填
+    let aligned_off = offset / sector * sector;
+    let lead = (offset - aligned_off) as usize;
+    let padded = ((lead + buf.len()) as u64).div_ceil(sector) * sector;
+    let mut tmp = vec![0u8; padded as usize];
+    read_volume_span_raw(handle, aligned_off, &mut tmp)?;
+    buf.copy_from_slice(&tmp[lead..lead + buf.len()]);
+    Ok(())
+}
+
+/// 对齐路径：直接整段读卷（长读分片与 0 进度检测）
+fn read_volume_span_raw(handle: &VolumeHandle, offset: u64, buf: &mut [u8]) -> NtfsResult<()> {
     if buf.is_empty() {
         return Ok(());
     }
@@ -807,11 +840,56 @@ pub struct ParsedMftRecord {
     pub data_real_size: Option<u64>,
     /// 分配大小（占用空间，非驻留 $DATA 头 0x28）；与 Fs 引擎默认口径一致
     pub data_allocated_size: Option<u64>,
+    pub attr_list_refs: Vec<u64>,
+    pub data_ext_ref: Option<u64>,
+    /// 非驻留 $ATTRIBUTE_LIST 的 runlist：(逻辑起始VCN, 跨度VCN数, 起始LCN)
+    pub attr_list_runs: Vec<(u64, u64, i64)>,
+    /// 非驻留 $ATTRIBUTE_LIST 属性值字节数（0x30 真实长度；0 = 未知）
+    pub attr_list_value_size: u64,
 }
 
 /// 判断是否为 $BadClus（坏簇映射表）
 fn is_bad_clus(record_index: u64) -> bool {
     record_index == BAD_CLUS_RECORD
+}
+
+/// 解析 $ATTRIBUTE_LIST 属性值（ATTRIBUTE_LIST_ENTRY 链）
+///
+/// 返回 `(refs, data_ext_ref)`：
+/// - `refs`：属性链中所有 ≠ 基记录自身的 MFT 记录号（含命名流/ADS 的扩展条目），
+///   用于 `build_tree` 过滤无名的扩展记录（避免算作文件）。
+/// - `data_ext_ref`：指向非命名 `$DATA` 流（`name_len == 0 && lowest_vcn == 0`）
+///   扩展条目的记录号。大文件尺寸（0x28/0x30 头）随完整非驻留 `$DATA` 属性
+///   整体搬到扩展记录，基记录通常只剩一个空的 0x80 头。
+fn parse_attr_list(value: &[u8], record_index: u64) -> (Vec<u64>, Option<u64>) {
+    let mut refs = Vec::new();
+    let mut data_ext_ref: Option<u64> = None;
+    let mut off = 0usize;
+    while off + 24 <= value.len() {
+        let etype = u32::from_le_bytes(value[off..off + 4].try_into().unwrap());
+        if etype == 0xFFFFFFFF {
+            break;
+        }
+        let rec_len = u16::from_le_bytes(value[off + 4..off + 6].try_into().unwrap()) as usize;
+        if rec_len == 0 {
+            break;
+        }
+        let name_len = value[off + 6];
+        let lowest_vcn = u64::from_le_bytes(value[off + 8..off + 16].try_into().unwrap());
+        let target = u64::from_le_bytes(value[off + 16..off + 24].try_into().unwrap()) & 0x0000_FFFF_FFFF_FFFF;
+        if target != record_index {
+            refs.push(target);
+            if data_ext_ref.is_none()
+                && etype == 0x80
+                && name_len == 0
+                && lowest_vcn == 0
+            {
+                data_ext_ref = Some(target);
+            }
+        }
+        off += (rec_len + 7) & !7;
+    }
+    (refs, data_ext_ref)
 }
 
 pub fn parse_mft_record(data: &[u8], record_index: u64) -> NtfsResult<Option<ParsedMftRecord>> {
@@ -834,6 +912,10 @@ pub fn parse_mft_record(data: &[u8], record_index: u64) -> NtfsResult<Option<Par
         file_names: Vec::new(),
         data_real_size: None,
         data_allocated_size: None,
+        attr_list_refs: Vec::new(),
+        data_ext_ref: None,
+        attr_list_runs: Vec::new(),
+        attr_list_value_size: 0,
     };
 
     let mut off = result.header.attribute_offset as usize;
@@ -856,19 +938,57 @@ pub fn parse_mft_record(data: &[u8], record_index: u64) -> NtfsResult<Option<Par
                     }
                 }
             },
+            Some(AttributeType::AttrList) if !ah.non_resident => {
+                if let Ok(val) = get_resident_value(rec, attr_body_start, &ah) {
+                    let (refs, dref) = parse_attr_list(val, record_index);
+                    result.attr_list_refs.extend(refs);
+                    if result.data_ext_ref.is_none() {
+                        result.data_ext_ref = dref;
+                    }
+                }
+            },
+            // 非驻留 $ATTRIBUTE_LIST：值本体不在 MFT 记录里，先记下 runlist，
+            // 由 resolve_nonresident_attr_lists 二阶段从卷上读取后再解析
+            Some(AttributeType::AttrList) if ah.non_resident => {
+                if ah.total_length >= 64 {
+                    let lowest_vcn =
+                        u64::from_le_bytes(rec[attr_body_start + 16..attr_body_start + 24].try_into().unwrap());
+                    if lowest_vcn == 0 {
+                        result.attr_list_value_size =
+                            u64::from_le_bytes(rec[attr_body_start + 48..attr_body_start + 56].try_into().unwrap());
+                        let run_off = attr_body_start
+                            + u16::from_le_bytes(rec[attr_body_start + 32..attr_body_start + 34].try_into().unwrap())
+                                as usize;
+                        let attr_end = (attr_body_start + ah.total_length as usize).min(rec.len());
+                        if run_off > attr_body_start && run_off < attr_end {
+                            if let Ok(runs) = parse_runlist(rec, run_off, attr_end) {
+                                result.attr_list_runs = runs;
+                            }
+                        }
+                    }
+                }
+            },
             Some(AttributeType::Data) if ah.non_resident => {
-                // 排除 $BadClus：其 $BAD 流大小 = 整卷容量，非真实文件数据
-                if !is_bad_clus(record_index) && ah.total_length >= 64 {
-                    // 非驻留 $DATA 头：0x28 = 分配大小（占用空间），0x30 = 真实长度
-                    let alloc = u64::from_le_bytes(rec[attr_body_start + 40..attr_body_start + 48].try_into().unwrap());
-                    result.data_allocated_size = Some(alloc);
-                    let rs = u64::from_le_bytes(rec[attr_body_start + 48..attr_body_start + 56].try_into().unwrap());
-                    result.data_real_size = Some(rs);
+                // 排除 $BadClus：其 $BAD 流大小 = 整卷容量，非真实文件数据；
+                // 排除命名流（ADS，name_length != 0）；仅取 lowest_vcn == 0 的首个数据段头
+                if !is_bad_clus(record_index) && ah.name_length == 0 && ah.total_length >= 64 {
+                    let lowest_vcn =
+                        u64::from_le_bytes(rec[attr_body_start + 16..attr_body_start + 24].try_into().unwrap());
+                    if lowest_vcn == 0 {
+                        // 非驻留 $DATA 头：0x28 = 分配大小（占用空间），0x30 = 真实长度
+                        let alloc = u64::from_le_bytes(rec[attr_body_start + 40..attr_body_start + 48].try_into().unwrap());
+                        result.data_allocated_size = Some(alloc);
+                        let rs = u64::from_le_bytes(rec[attr_body_start + 48..attr_body_start + 56].try_into().unwrap());
+                        result.data_real_size = Some(rs);
+                    }
                 }
             },
             Some(AttributeType::Data) => {
-                if let Ok(val) = get_resident_value(rec, attr_body_start, &ah) {
-                    result.data_real_size = Some(val.len() as u64);
+                // 排除命名流（ADS）的驻留 $DATA
+                if ah.name_length == 0 && result.data_real_size.is_none() {
+                    if let Ok(val) = get_resident_value(rec, attr_body_start, &ah) {
+                        result.data_real_size = Some(val.len() as u64);
+                    }
                 }
             },
             _ => {},
@@ -902,6 +1022,10 @@ fn parse_mft_record_mut(data: &mut [u8], record_index: u64) -> NtfsResult<Option
         file_names: Vec::new(),
         data_real_size: None,
         data_allocated_size: None,
+        attr_list_refs: Vec::new(),
+        data_ext_ref: None,
+        attr_list_runs: Vec::new(),
+        attr_list_value_size: 0,
     };
 
     let mut off = result.header.attribute_offset as usize;
@@ -924,19 +1048,57 @@ fn parse_mft_record_mut(data: &mut [u8], record_index: u64) -> NtfsResult<Option
                     }
                 }
             },
+            Some(AttributeType::AttrList) if !ah.non_resident => {
+                if let Ok(val) = get_resident_value(data, attr_body_start, &ah) {
+                    let (refs, dref) = parse_attr_list(val, record_index);
+                    result.attr_list_refs.extend(refs);
+                    if result.data_ext_ref.is_none() {
+                        result.data_ext_ref = dref;
+                    }
+                }
+            },
+            // 非驻留 $ATTRIBUTE_LIST：值本体不在 MFT 记录里，先记下 runlist，
+            // 由 resolve_nonresident_attr_lists 二阶段从卷上读取后再解析
+            Some(AttributeType::AttrList) if ah.non_resident => {
+                if ah.total_length >= 64 {
+                    let lowest_vcn =
+                        u64::from_le_bytes(data[attr_body_start + 16..attr_body_start + 24].try_into().unwrap());
+                    if lowest_vcn == 0 {
+                        result.attr_list_value_size =
+                            u64::from_le_bytes(data[attr_body_start + 48..attr_body_start + 56].try_into().unwrap());
+                        let run_off = attr_body_start
+                            + u16::from_le_bytes(data[attr_body_start + 32..attr_body_start + 34].try_into().unwrap())
+                                as usize;
+                        let attr_end = (attr_body_start + ah.total_length as usize).min(data.len());
+                        if run_off > attr_body_start && run_off < attr_end {
+                            if let Ok(runs) = parse_runlist(data, run_off, attr_end) {
+                                result.attr_list_runs = runs;
+                            }
+                        }
+                    }
+                }
+            },
             Some(AttributeType::Data) if ah.non_resident => {
-                // 排除 $BadClus：其 $BAD 流大小 = 整卷容量，非真实文件数据
-                if !is_bad_clus(record_index) && ah.total_length >= 64 {
-                    // 非驻留 $DATA 头：0x28 = 分配大小（占用空间），0x30 = 真实长度
-                    let alloc = u64::from_le_bytes(data[attr_body_start + 40..attr_body_start + 48].try_into().unwrap());
-                    result.data_allocated_size = Some(alloc);
-                    let rs = u64::from_le_bytes(data[attr_body_start + 48..attr_body_start + 56].try_into().unwrap());
-                    result.data_real_size = Some(rs);
+                // 排除 $BadClus：其 $BAD 流大小 = 整卷容量，非真实文件数据；
+                // 排除命名流（ADS，name_length != 0）；仅取 lowest_vcn == 0 的首个数据段头
+                if !is_bad_clus(record_index) && ah.name_length == 0 && ah.total_length >= 64 {
+                    let lowest_vcn =
+                        u64::from_le_bytes(data[attr_body_start + 16..attr_body_start + 24].try_into().unwrap());
+                    if lowest_vcn == 0 {
+                        // 非驻留 $DATA 头：0x28 = 分配大小（占用空间），0x30 = 真实长度
+                        let alloc = u64::from_le_bytes(data[attr_body_start + 40..attr_body_start + 48].try_into().unwrap());
+                        result.data_allocated_size = Some(alloc);
+                        let rs = u64::from_le_bytes(data[attr_body_start + 48..attr_body_start + 56].try_into().unwrap());
+                        result.data_real_size = Some(rs);
+                    }
                 }
             },
             Some(AttributeType::Data) => {
-                if let Ok(val) = get_resident_value(data, attr_body_start, &ah) {
-                    result.data_real_size = Some(val.len() as u64);
+                // 排除命名流（ADS）的驻留 $DATA
+                if ah.name_length == 0 && result.data_real_size.is_none() {
+                    if let Ok(val) = get_resident_value(data, attr_body_start, &ah) {
+                        result.data_real_size = Some(val.len() as u64);
+                    }
                 }
             },
             _ => {},
@@ -962,7 +1124,7 @@ pub fn parse_mft_records(raw: &mut [u8], bpr: u32) -> NtfsResult<Vec<ParsedMftRe
     let no_name_total = std::sync::atomic::AtomicUsize::new(0);
     let err_total = std::sync::atomic::AtomicUsize::new(0);
 
-    let out: Vec<ParsedMftRecord> = raw
+    let mut out: Vec<ParsedMftRecord> = raw
         .par_chunks_mut(rs)
         .take(n)
         .enumerate()
@@ -987,6 +1149,8 @@ pub fn parse_mft_records(raw: &mut [u8], bpr: u32) -> NtfsResult<Vec<ParsedMftRe
         })
         .collect();
 
+    transfer_ext_data_sizes(&mut out);
+
     tracing::info!(
         target: "treesize::ntfs",
         "MFT 解析统计：原始记录={} in-use有效={} 其中无$FILE_NAME={} 解析失败={}",
@@ -997,6 +1161,178 @@ pub fn parse_mft_records(raw: &mut [u8], bpr: u32) -> NtfsResult<Vec<ParsedMftRe
     );
 
     Ok(out)
+}
+
+/// 将 `$ATTRIBUTE_LIST` 扩展记录上的 `$DATA` 尺寸回填到基记录
+///
+/// 大文件使用属性列表时，完整的非驻留 `$DATA` 属性（含 0x28 分配大小 /
+/// 0x30 真实长度头）整体搬到扩展记录，基记录通常只剩一个空的 0x80 头。
+/// 三遍法：
+/// ① 汇总缺失尺寸的基记录所指向的扩展记录号；
+/// ② 从扩展记录读取（alloc, real）尺寸（扩展记录本身通常无 $FILE_NAME）；
+/// ③ 回填基记录。
+pub fn transfer_ext_data_sizes(records: &mut [ParsedMftRecord]) {
+    // 缺失 = 尺寸未知（None）或仅剩空 0x80 stub（Some(0)，真实尺寸在扩展记录上）
+    let mut want: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for rec in records.iter() {
+        if matches!(rec.data_real_size, None | Some(0)) {
+            if let Some(ext) = rec.data_ext_ref {
+                want.insert(ext);
+            }
+        }
+    }
+    if want.is_empty() {
+        return;
+    }
+
+    let mut ext_map: std::collections::HashMap<u64, (Option<u64>, Option<u64>)> =
+        std::collections::HashMap::new();
+    // 扩展记录本身同样排除 stub（real>0 才可信，防止空尺寸覆盖真值）
+    for rec in records.iter() {
+        if want.contains(&rec.header.record_number)
+            && matches!(rec.data_real_size, Some(v) if v > 0)
+        {
+            ext_map.insert(rec.header.record_number, (rec.data_allocated_size, rec.data_real_size));
+        }
+    }
+    if ext_map.is_empty() {
+        return;
+    }
+
+    for rec in records.iter_mut() {
+        if !matches!(rec.data_real_size, None | Some(0)) {
+            continue;
+        }
+        // Option<u64> 是 Copy，先取出值再 match，避免 ref binding 的借用冲突
+        let st = rec.data_real_size;
+        let ext = rec.data_ext_ref;
+        if let Some(ext) = ext {
+            if let Some((alloc, real)) = ext_map.get(&ext) {
+                match st {
+                    None => {
+                        // 尺寸未知：仅在自身无分配大小时补齐，real 始终可信（ext_map 保证 > 0）
+                        if rec.data_allocated_size.is_none() {
+                            rec.data_allocated_size = *alloc;
+                        }
+                        rec.data_real_size = *real;
+                    },
+                    Some(0) => {
+                        // 空 0x80 stub：仅以正尺寸覆盖，不被空值污染
+                        if real.is_some_and(|v| v > 0) {
+                            rec.data_real_size = *real;
+                        }
+                        if rec.data_allocated_size.is_none()
+                            && alloc.is_some_and(|v| v > 0)
+                        {
+                            rec.data_allocated_size = *alloc;
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        }
+    }
+}
+
+/// 解析非驻留 `$ATTRIBUTE_LIST` 属性的运行链，读取并解析属性列表内容
+///
+/// $MFT 大文件（如数据库）的属性列表本身可能超出 1 KiB 记录上限而需要一条
+/// 非驻留 0x20 属性。此时 ①② 阶段抓到的是 run 链（`attr_list_runs`）而非内容。
+/// 该函数遍历扩展记录，逐 run 从卷上读取字节，`parse_attr_list` 解析后
+/// 将扩展记录引用合并进 `attr_list_refs`。需在 `parse_mft_records` 之后、
+/// `transfer_ext_data_sizes` 之前调用。
+///
+/// 返回成功处理的记录数（调用方据其决定是否再调 `transfer_ext_data_sizes`）。
+pub fn resolve_nonresident_attr_lists(
+    handle: &VolumeHandle,
+    vol: &VolumeInfo,
+    records: &mut [ParsedMftRecord],
+) -> usize {
+    let cluster_size = vol.bytes_per_cluster() as u64;
+    if cluster_size == 0 {
+        return 0;
+    }
+    // 安全上限，防止损坏 run 链导致的错误读取
+    const MAX_ATTR_LIST_VALUE: u64 = 16 * 1024 * 1024;
+
+    let mut done = 0usize;
+    for rec in records.iter_mut() {
+        // 已在 ①② 阶段从驻留内容解析过、或没有非驻留属性列表的记录直接跳过
+        if !rec.attr_list_refs.is_empty() || rec.attr_list_runs.is_empty() {
+            continue;
+        }
+        // 覆盖长度 = 所有 run 覆盖段的总量（饱和），截断到声明的值长度
+        let mut cover: u64 = 0;
+        for &(_, span, _) in &rec.attr_list_runs {
+            cover = cover.saturating_add(span.saturating_mul(cluster_size));
+        }
+        let take = if rec.attr_list_value_size > 0 {
+            cover.min(rec.attr_list_value_size)
+        } else {
+            cover
+        };
+        if take == 0 || take > MAX_ATTR_LIST_VALUE {
+            if take > MAX_ATTR_LIST_VALUE {
+                tracing::warn!(
+                    target: "treesize::ntfs",
+                    "MFT 记录 {} 的属性列表覆盖长度 {} 超出上限，跳过非驻留解析",
+                    rec.header.record_number,
+                    take
+                );
+            }
+            continue;
+        }
+        // 先零填充整块缓冲，再逐 run 读卷，稀疏段保持零
+        let mut buf = vec![0u8; take as usize];
+        let mut ok = true;
+        for (start_vcn, span, start_lcn) in rec.attr_list_runs.clone() {
+            // start_vcn 相对属性流起点，跨度按簇大小换算成字节偏移。
+            // start_lcn < 0 表示稀疏段（保持零填充）；src_offset == 0
+            // 且 start_lcn != 0 的组合只有坏 run 才会出现，一并跳过。
+            let dst = start_vcn.saturating_mul(cluster_size);
+            if dst >= take {
+                break;
+            }
+            let n = span.saturating_mul(cluster_size).min(take - dst);
+            if start_lcn < 0 || n == 0 {
+                continue;
+            }
+            let src_offset = start_lcn as u64 * cluster_size;
+            if src_offset == 0 && start_lcn != 0 {
+                continue;
+            }
+            let dst_off = dst as usize;
+            let n = n as usize;
+            if let Err(e) = read_volume_span(
+                handle,
+                src_offset,
+                &mut buf[dst_off..dst_off + n],
+                vol.bytes_per_sector as u64,
+            ) {
+                tracing::warn!(
+                    target: "treesize::ntfs",
+                    "MFT 记录 {} 的属性列表内容读取失败（{}），跳过",
+                    rec.header.record_number,
+                    e
+                );
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            continue;
+        }
+        let (refs, data_ext_ref) = parse_attr_list(&buf, rec.header.record_number);
+        if refs.is_empty() {
+            continue;
+        }
+        rec.attr_list_refs.extend(refs);
+        if rec.data_ext_ref.is_none() {
+            rec.data_ext_ref = data_ext_ref;
+        }
+        done += 1;
+    }
+    done
 }
 
 // ─── MFT 大小映射表（用于 USN 扫描器补充文件大小） ──────────────────────────
@@ -1042,8 +1378,19 @@ pub struct MftFileEntry {
 }
 
 pub fn build_tree(records: &[ParsedMftRecord], apparent_size: bool) -> NtfsResult<Vec<MftFileEntry>> {
+    // 收集所有 $ATTRIBUTE_LIST 指向的扩展记录号：
+    // 这些记录本身不是文件（通常无 $FILE_NAME），若不过滤会在树中产生孤立项
+    let frag_refs: std::collections::HashSet<u64> = records
+        .iter()
+        .flat_map(|rec| rec.attr_list_refs.iter().copied())
+        .collect();
+
     let mut entries = Vec::with_capacity(records.len());
     for rec in records {
+        // 无名扩展记录：已被 transfer_ext_data_sizes 用作尺寸来源，树中跳过
+        if frag_refs.contains(&rec.header.record_number) && rec.file_names.is_empty() {
+            continue;
+        }
         let best = rec.file_names.iter().max_by_key(|n| match n.name_namespace {
             1 => 2,
             3 => 3,

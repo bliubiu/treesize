@@ -31,7 +31,7 @@ use crate::domain::scan_engine::{CancelToken, ScanEngine, ScanOptions, ScanProgr
 
 use super::ntfs_reader::{
     build_size_map, get_volume_info, parse_mft_records, path_to_volume_device, query_usn_journal, read_mft_raw,
-    read_usn_records, UsnRecord, VolumeHandle,
+    read_usn_records, resolve_nonresident_attr_lists, transfer_ext_data_sizes, UsnRecord, VolumeHandle,
 };
 
 // ─── USN 扫描引擎 ──────────────────────────────────────────────────────────
@@ -192,8 +192,13 @@ fn do_usn_scan(
     let mut raw_mft = read_mft_raw(handle, &volume_info, max_mft_records)
         .map_err(|e| DomainError::ScanFailed(format!("读取 MFT 失败：{e}")))?;
 
-    let parsed_mft = parse_mft_records(&mut raw_mft, volume_info.bytes_per_record)
+    let mut parsed_mft = parse_mft_records(&mut raw_mft, volume_info.bytes_per_record)
         .map_err(|e| DomainError::ScanFailed(format!("解析 MFT 失败：{e}")))?;
+
+    // 二阶段解析：$ATTRIBUTE_LIST 非驻留时按 run 链回读并登记扩展记录引用
+    if resolve_nonresident_attr_lists(handle, &volume_info, &mut parsed_mft) > 0 {
+        transfer_ext_data_sizes(&mut parsed_mft);
+    }
 
     // 构建 记录号→文件大小 映射表（口径与 Fs 引擎一致）
     let size_map = build_size_map(&parsed_mft, options.apparent_size);
