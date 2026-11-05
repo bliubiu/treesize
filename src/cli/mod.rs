@@ -5,19 +5,17 @@
 pub mod args;
 pub mod output;
 
-pub use args::{CliArgs, CliMode, OutputFormat};
-
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+pub use args::{CliArgs, CliMode, OutputFormat};
 
 use crate::application::{ScanService, TrendService};
 use crate::domain::error::Result;
 use crate::domain::scan_engine::{ScanEngineType, ScanProgress};
-use crate::infrastructure::{detect_best_engine, HistoryStorage};
-
 #[cfg(not(target_os = "windows"))]
 use crate::infrastructure::FsScanEngine;
-
+use crate::infrastructure::{detect_best_engine, HistoryStorage};
 #[cfg(target_os = "windows")]
 use crate::infrastructure::{FsScanEngine, MftScanEngine, UsnScanEngine};
 
@@ -71,6 +69,11 @@ pub fn run(args: &CliArgs) -> Result<()> {
     eprintln!("==============================");
     eprintln!();
 
+    // 卷级对账：非卷根扫描时 reconcile 返回 None，保持原输出不变
+    if let Some(r) = crate::infrastructure::reconcile(&path, stats.total_size.bytes(), options.apparent_size) {
+        emit_volume_reconciliation(&r);
+    }
+
     // 根据输出格式生成报表
     output::emit_reports(args, &root, &stats)?;
 
@@ -87,8 +90,43 @@ pub fn run(args: &CliArgs) -> Result<()> {
     Ok(())
 }
 
+/// 输出卷级对账（仅卷根扫描时调用）
+fn emit_volume_reconciliation(r: &crate::infrastructure::VolumeReconciliation) {
+    use crate::domain::value_objects::ByteSize;
+
+    eprintln!("========== 卷级对账 ==========");
+    eprintln!("卷：{}", r.volume_root);
+    eprintln!(
+        "总容量 {} | 已用 {} | 空闲 {}",
+        ByteSize(r.total_bytes),
+        ByteSize(r.used_bytes),
+        ByteSize(r.free_bytes),
+    );
+    eprintln!("本次计入 {}（口径：{}）", ByteSize(r.accounted_bytes), r.basis_label());
+    eprintln!(
+        "{}差额 {}（覆盖率 {:.1}%）",
+        r.gap_label(),
+        ByteSize(r.gap_abs()),
+        r.coverage_percent(),
+    );
+    if r.total_unreadable > 0 {
+        eprintln!("不可读目录：{} 个", r.total_unreadable);
+        const MAX_SHOW: usize = 20;
+        for e in r.unreadable.iter().take(MAX_SHOW) {
+            eprintln!("  - {}（{}）", e.path, e.reason);
+        }
+        let shown = r.unreadable.len().min(MAX_SHOW);
+        if r.total_unreadable > shown {
+            eprintln!("  ... 另有 {} 个（完整清单见 GUI 概览页）", r.total_unreadable - shown);
+        }
+    }
+    eprintln!("说明：差额不等于扫描出错；卷已用空间还含元数据、卷影副本、权限拒绝或独占打开的系统文件，硬链接重复计数会使计入偏大。");
+    eprintln!("==============================");
+    eprintln!();
+}
+
 /// 保存扫描结果到历史数据库
-fn save_to_history(args: &CliArgs, path: &PathBuf, root: &crate::domain::FileNode, elapsed_ms: u64) -> Result<()> {
+fn save_to_history(args: &CliArgs, path: &Path, root: &crate::domain::FileNode, elapsed_ms: u64) -> Result<()> {
     let storage = open_history(args)?;
     let (snapshot, categories, dirs) = TrendService::build_snapshot(path, root, elapsed_ms);
     let scan_id = storage
@@ -99,7 +137,7 @@ fn save_to_history(args: &CliArgs, path: &PathBuf, root: &crate::domain::FileNod
 }
 
 /// 显示扫描历史趋势
-fn display_history(args: &CliArgs, path: &PathBuf) -> Result<()> {
+fn display_history(args: &CliArgs, path: &Path) -> Result<()> {
     let storage = open_history(args)?;
     let path_str = path.to_string_lossy().to_string();
 

@@ -25,7 +25,8 @@ fn main() {
         if Path::new(path).exists() {
             println!("cargo:rustc-cfg=embedded_font");
             println!("cargo:rustc-cfg={}", cfg_flag);
-            println!("cargo:warning=检测到 {}，将内嵌中文字体", path);
+            // 正常路径只记录信息，避免每次编译都刷一条 warning（`-vv` 下可见）
+            println!("检测到 {}，将内嵌中文字体", path);
             detected = true;
             break;
         }

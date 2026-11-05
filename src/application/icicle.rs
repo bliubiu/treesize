@@ -82,6 +82,15 @@ impl Default for LayoutConfig {
     }
 }
 
+/// 递归布局期间保持不变的参数，集中传递以避免函数参数过多。
+#[derive(Clone, Copy)]
+struct LayoutCtx {
+    total: u64,
+    max_depth: usize,
+    min_w: f64,
+    child_dir: i32,
+}
+
 /// 计算 Icicle / Flame Graph 布局
 ///
 /// 返回平铺的区块列表，每个区块包含位置和元数据。
@@ -103,11 +112,13 @@ pub fn compute_layout(root: &FileNode, config: &LayoutConfig) -> Vec<IcicleBlock
         root_y,
         config.width,
         config.row_height,
-        total,
         0,
-        depth_limit,
-        config.min_block_width,
-        child_dir,
+        LayoutCtx {
+            total,
+            max_depth: depth_limit,
+            min_w: config.min_block_width,
+            child_dir,
+        },
         &mut blocks,
     );
 
@@ -120,19 +131,22 @@ fn compute_blocks(
     y: f64,
     w: f64,
     h: f64,
-    total: u64,
     depth: usize,
-    max_depth: usize,
-    min_w: f64,
-    child_dir: i32,
+    ctx: LayoutCtx,
     blocks: &mut Vec<IcicleBlock>,
 ) {
+    let LayoutCtx {
+        total,
+        max_depth,
+        min_w,
+        child_dir,
+    } = ctx;
     // 添加当前节点区块
     if depth == 0 || w >= min_w {
         let label = if node.is_dir() {
             truncate_label(&node.name, w, 11.0)
         } else {
-            let name = format!("{}  {}", &node.name, ByteSize(node.size.0));
+            let name = format!("{}  {}", node.name, ByteSize(node.size.0));
             truncate_label(&name, w, 11.0)
         };
         blocks.push(IcicleBlock {
@@ -155,7 +169,7 @@ fn compute_blocks(
 
     // 排序子节点（按大小降序）
     let mut children: Vec<&FileNode> = node.children.iter().collect();
-    children.sort_by(|a, b| b.size.cmp(&a.size));
+    children.sort_by_key(|a| std::cmp::Reverse(a.size));
 
     let child_y = y + child_dir as f64 * h;
 
@@ -176,11 +190,13 @@ fn compute_blocks(
             child_y,
             cw,
             h,
-            total,
             depth + 1,
-            max_depth,
-            min_w,
-            child_dir,
+            LayoutCtx {
+                total,
+                max_depth,
+                min_w,
+                child_dir,
+            },
             blocks,
         );
 
@@ -218,7 +234,7 @@ pub fn compute_layout_v2(root: &FileNode, config: &LayoutConfig) -> Vec<IcicleBl
 
     // 递归布局子节点（只有根节点的子节点向下分割，每个子节点内部不继续水平分割）
     let mut children: Vec<&FileNode> = root.children.iter().collect();
-    children.sort_by(|a, b| b.size.cmp(&a.size));
+    children.sort_by_key(|a| std::cmp::Reverse(a.size));
 
     let child_y = root_y + child_dir as f64 * config.row_height;
 
@@ -236,11 +252,13 @@ pub fn compute_layout_v2(root: &FileNode, config: &LayoutConfig) -> Vec<IcicleBl
             child_y,
             config.width, // full width (the actual x position is computed within)
             config.row_height,
-            total,
             1,
-            depth_limit,
-            config.min_block_width,
-            child_dir,
+            LayoutCtx {
+                total,
+                max_depth: depth_limit,
+                min_w: config.min_block_width,
+                child_dir,
+            },
             &mut blocks,
         );
     }
@@ -256,13 +274,16 @@ fn layout_node(
     y: f64,
     w: f64,
     h: f64,
-    total: u64,
     depth: usize,
-    max_depth: usize,
-    min_w: f64,
-    child_dir: i32,
+    ctx: LayoutCtx,
     blocks: &mut Vec<IcicleBlock>,
 ) {
+    let LayoutCtx {
+        total,
+        max_depth,
+        min_w,
+        child_dir,
+    } = ctx;
     if w < min_w {
         return;
     }
@@ -276,7 +297,7 @@ fn layout_node(
 
     // 排序子节点
     let mut children: Vec<&FileNode> = node.children.iter().collect();
-    children.sort_by(|a, b| b.size.cmp(&a.size));
+    children.sort_by_key(|a| std::cmp::Reverse(a.size));
 
     let child_y = y + child_dir as f64 * h;
 
@@ -303,11 +324,13 @@ fn layout_node(
             child_y,
             cw,
             h,
-            total,
             depth + 1,
-            max_depth,
-            min_w,
-            child_dir,
+            LayoutCtx {
+                total,
+                max_depth,
+                min_w,
+                child_dir,
+            },
             blocks,
         );
 
@@ -333,7 +356,7 @@ fn add_block(
     } else if node.is_dir() {
         truncate_label(&node.name, w, 11.0)
     } else {
-        let name = format!("{}  {}", &node.name, ByteSize(node.size.0));
+        let name = format!("{}  {}", node.name, ByteSize(node.size.0));
         truncate_label(&name, w, 11.0)
     };
 
@@ -462,8 +485,9 @@ fn truncate_label(name: &str, max_w: f64, font_size: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     fn make_tree() -> FileNode {
         let mut root = FileNode::new_dir(PathBuf::from("/root"), None);

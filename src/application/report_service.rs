@@ -86,14 +86,12 @@ impl ReportService {
     pub fn write_json(root: &FileNode, path: &Path) -> Result<()> {
         let file = std::fs::File::create(path).map_err(DomainError::Io)?;
         let writer = std::io::BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, root).map_err(|e| ser_err(e))?;
+        serde_json::to_writer_pretty(writer, root).map_err(ser_err)?;
         Ok(())
     }
 
     /// 序列化为 JSON 字符串
-    pub fn to_json_string(root: &FileNode) -> Result<String> {
-        serde_json::to_string_pretty(root).map_err(|e| ser_err(e))
-    }
+    pub fn to_json_string(root: &FileNode) -> Result<String> { serde_json::to_string_pretty(root).map_err(ser_err) }
 
     /// 导出扁平化 CSV（每个文件/目录一行）
     pub fn write_csv(root: &FileNode, path: &Path) -> Result<()> {
@@ -119,7 +117,7 @@ impl ReportService {
 
     fn write_csv_header<W: Write>(writer: &mut csv::Writer<W>) -> Result<()> {
         writer
-            .write_record(&[
+            .write_record([
                 "路径",
                 "名称",
                 "类型",
@@ -130,7 +128,7 @@ impl ReportService {
                 "目录数",
                 "修改时间",
             ])
-            .map_err(|e| ser_err(e))
+            .map_err(ser_err)
     }
 
     fn write_csv_inner<W: Write>(node: &FileNode, writer: &mut csv::Writer<W>) -> Result<()> {
@@ -157,7 +155,7 @@ impl ReportService {
                 node.dir_count.to_string(),
                 modified,
             ])
-            .map_err(|e| ser_err(e))?;
+            .map_err(ser_err)?;
 
         for child in &node.children {
             Self::write_csv_inner(child, writer)?;
@@ -169,7 +167,7 @@ impl ReportService {
     pub fn top_n_files_report(root: &FileNode, n: usize) -> Vec<TopNEntry> {
         let total = root.size.0;
         let mut files: Vec<&FileNode> = root.iter_all().filter(|n| n.is_file()).collect();
-        files.sort_by(|a, b| b.size.cmp(&a.size));
+        files.sort_by_key(|a| std::cmp::Reverse(a.size));
         files.truncate(n);
         files
             .into_iter()
@@ -202,7 +200,7 @@ impl ReportService {
             .iter_all()
             .filter(|n| n.is_dir() && !n.children.is_empty())
             .collect();
-        dirs.sort_by(|a, b| b.size.cmp(&a.size));
+        dirs.sort_by_key(|a| std::cmp::Reverse(a.size));
         dirs.truncate(n);
         dirs.into_iter()
             .map(|node| {
@@ -243,9 +241,9 @@ impl ReportService {
         let top_files = Self::top_n_files_report(root, top_n);
         let top_dirs = Self::top_n_dirs_report(root, top_n);
 
-        let tree_val = serde_json::to_value(root).map_err(|e| ser_err(e))?;
-        let files_val = serde_json::to_value(&top_files).map_err(|e| ser_err(e))?;
-        let dirs_val = serde_json::to_value(&top_dirs).map_err(|e| ser_err(e))?;
+        let tree_val = serde_json::to_value(root).map_err(ser_err)?;
+        let files_val = serde_json::to_value(&top_files).map_err(ser_err)?;
+        let dirs_val = serde_json::to_value(&top_dirs).map_err(ser_err)?;
         let classify_val = classify.and_then(|c| serde_json::to_value(c).ok());
 
         write_html_tags(writer)?;
@@ -445,14 +443,14 @@ fn write_html_js<W: Write>(
     // write the rest of the JS via write!() with literal strings only.
     // The JS code uses string concatenation instead of template literals.
     write!(w, "<script>\nvar TREE=").map_err(DomainError::Io)?;
-    serde_json::to_writer(&mut *w, tree).map_err(|e| ser_err(e))?;
+    serde_json::to_writer(&mut *w, tree).map_err(ser_err)?;
     write!(w, ";var TOP_FILES=").map_err(DomainError::Io)?;
-    serde_json::to_writer(&mut *w, top_files).map_err(|e| ser_err(e))?;
+    serde_json::to_writer(&mut *w, top_files).map_err(ser_err)?;
     write!(w, ";var TOP_DIRS=").map_err(DomainError::Io)?;
-    serde_json::to_writer(&mut *w, top_dirs).map_err(|e| ser_err(e))?;
+    serde_json::to_writer(&mut *w, top_dirs).map_err(ser_err)?;
     write!(w, ";var CLASSIFY=").map_err(DomainError::Io)?;
     match classify {
-        Some(v) => serde_json::to_writer(&mut *w, v).map_err(|e| ser_err(e))?,
+        Some(v) => serde_json::to_writer(&mut *w, v).map_err(ser_err)?,
         None => write!(w, "null").map_err(DomainError::Io)?,
     }
     write!(w, ";var TS=").map_err(DomainError::Io)?;
@@ -466,8 +464,9 @@ fn write_html_js<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     fn build_tree() -> FileNode {
         let mut root = FileNode::new_dir(PathBuf::from("/root"), None);

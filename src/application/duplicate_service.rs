@@ -38,7 +38,7 @@ fn dedup_pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
         let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
-        let threads = ((cores / 2).max(1)).min(4);
+        let threads = (cores / 2).clamp(1, 4);
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(move |i| format!("treesize-dedup-{i}"))
@@ -158,45 +158,44 @@ impl DuplicateService {
         //
         // 小于 head_size 的文件直接计算全量哈希（标记为 has_full=true）
         // ═════════════════════════════════════════════════════════════════
-        let quick_hash_results: Vec<((u64, String), PathBuf, bool)> =
-            dedup_pool().install(move || {
-                size_buckets
-                    .into_par_iter()
-                    .flat_map(|(size, paths)| {
-                        paths.into_par_iter().filter_map(move |path| {
-                            if size < head_size {
-                                // 小文件：直接全量哈希，标记已完成
-                                match compute_hash(&path) {
-                                    Ok(hash) => Some(((size, hash), path, true)),
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            target: "treesize::duplicate",
-                                            "无法计算文件哈希：{} - {}",
-                                            path.display(),
-                                            e
-                                        );
-                                        None
-                                    },
-                                }
-                            } else {
-                                // 大文件：只读头部
-                                match compute_head_hash(&path, head_size) {
-                                    Ok(hash) => Some(((size, hash), path, false)),
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            target: "treesize::duplicate",
-                                            "无法计算文件头部哈希：{} - {}",
-                                            path.display(),
-                                            e
-                                        );
-                                        None
-                                    },
-                                }
+        let quick_hash_results: Vec<((u64, String), PathBuf, bool)> = dedup_pool().install(move || {
+            size_buckets
+                .into_par_iter()
+                .flat_map(|(size, paths)| {
+                    paths.into_par_iter().filter_map(move |path| {
+                        if size < head_size {
+                            // 小文件：直接全量哈希，标记已完成
+                            match compute_hash(&path) {
+                                Ok(hash) => Some(((size, hash), path, true)),
+                                Err(e) => {
+                                    tracing::debug!(
+                                        target: "treesize::duplicate",
+                                        "无法计算文件哈希：{} - {}",
+                                        path.display(),
+                                        e
+                                    );
+                                    None
+                                },
                             }
-                        })
+                        } else {
+                            // 大文件：只读头部
+                            match compute_head_hash(&path, head_size) {
+                                Ok(hash) => Some(((size, hash), path, false)),
+                                Err(e) => {
+                                    tracing::debug!(
+                                        target: "treesize::duplicate",
+                                        "无法计算文件头部哈希：{} - {}",
+                                        path.display(),
+                                        e
+                                    );
+                                    None
+                                },
+                            }
+                        }
                     })
-                    .collect()
-            });
+                })
+                .collect()
+        });
 
         let stage3_count = quick_hash_results.len();
         tracing::debug!(
@@ -302,7 +301,7 @@ impl DuplicateService {
             })
             .collect();
 
-        groups.sort_by(|a, b| b.wasted.cmp(&a.wasted));
+        groups.sort_by_key(|a| std::cmp::Reverse(a.wasted));
 
         let total_duplicate_files: u64 = groups.iter().map(|g| g.paths.len() as u64).sum();
         let total_wasted: u64 = groups.iter().map(|g| g.wasted.0).sum();
@@ -359,9 +358,11 @@ fn compute_hash(path: &PathBuf) -> std::io::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn finds_duplicates() {
@@ -376,7 +377,7 @@ mod tests {
         let tree = crate::test_utils::build_tree_from_dir(root);
         let report = DuplicateService::scan(&tree, 1);
 
-        assert!(report.groups.len() >= 1);
+        assert!(!report.groups.is_empty());
         let group = report
             .groups
             .iter()
@@ -428,7 +429,7 @@ mod tests {
         let tree = crate::test_utils::build_tree_from_dir(root);
         let report = DuplicateService::scan(&tree, 1);
 
-        assert!(report.groups.len() >= 1);
+        assert!(!report.groups.is_empty());
         let group = report
             .groups
             .iter()
@@ -457,7 +458,7 @@ mod tests {
         let tree = crate::test_utils::build_tree_from_dir(root);
         let report = DuplicateService::scan(&tree, 1);
 
-        assert!(report.groups.len() >= 1);
+        assert!(!report.groups.is_empty());
         let group = report
             .groups
             .iter()

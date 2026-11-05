@@ -10,12 +10,20 @@ use rusqlite::{params, Connection};
 use crate::application::models::{compute_top_growing, CategoryTrend, SizePoint, TrendReport};
 use crate::domain::scan_history::{CategorySnapshot, DirSizeSnapshot, ScanSnapshot};
 
-/// 当前数据库 schema 版本
-
 /// 扫描历史存储
 pub struct HistoryStorage {
     conn: Connection,
 }
+
+/// `get_diff_data` 的返回值：旧/新快照，及各自的分类、目录明细。
+pub type DiffData = (
+    ScanSnapshot,
+    ScanSnapshot,
+    Vec<CategorySnapshot>,
+    Vec<CategorySnapshot>,
+    Vec<DirSizeSnapshot>,
+    Vec<DirSizeSnapshot>,
+);
 
 impl HistoryStorage {
     /// 打开（或创建）指定路径的数据库
@@ -156,7 +164,7 @@ impl HistoryStorage {
         )?;
 
         let snapshots = stmt
-            .query_map(params![scan_path], |row| Self::parse_snapshot_row(row))?
+            .query_map(params![scan_path], Self::parse_snapshot_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(snapshots)
@@ -311,28 +319,14 @@ impl HistoryStorage {
     }
 
     /// 获取两次快照的对比数据
-    pub fn get_diff_data(
-        &self,
-        old_id: i64,
-        new_id: i64,
-    ) -> std::result::Result<
-        (
-            ScanSnapshot,
-            ScanSnapshot,
-            Vec<CategorySnapshot>,
-            Vec<CategorySnapshot>,
-            Vec<DirSizeSnapshot>,
-            Vec<DirSizeSnapshot>,
-        ),
-        rusqlite::Error,
-    > {
+    pub fn get_diff_data(&self, old_id: i64, new_id: i64) -> std::result::Result<DiffData, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, scanned_path, scanned_at, total_files, total_dirs, total_size, elapsed_ms
              FROM scan_snapshots WHERE id = ?1",
         )?;
 
-        let old = stmt.query_row(params![old_id], |row| Self::parse_snapshot_row(row))?;
-        let new = stmt.query_row(params![new_id], |row| Self::parse_snapshot_row(row))?;
+        let old = stmt.query_row(params![old_id], Self::parse_snapshot_row)?;
+        let new = stmt.query_row(params![new_id], Self::parse_snapshot_row)?;
 
         let old_cats = self.get_categories(old_id)?;
         let new_cats = self.get_categories(new_id)?;
@@ -345,9 +339,10 @@ impl HistoryStorage {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::domain::scan_history::{CategorySnapshot, DirSizeSnapshot, ScanSnapshot};
-    use tempfile::tempdir;
 
     fn make_snapshot(path: &str, files: u64, dirs: u64, size: u64, elapsed: u64) -> ScanSnapshot {
         ScanSnapshot {
@@ -622,8 +617,8 @@ mod tests {
             let snap = make_snapshot("/test", 10 * (i + 1), 1, 1000 * (i + 1), 100);
             let cats = vec![CategorySnapshot {
                 category: "图片".to_string(),
-                size: 500 * (i + 1) as u64,
-                file_count: 5 * (i + 1) as u64,
+                size: 500 * (i + 1),
+                file_count: 5 * (i + 1),
             }];
             storage.save_snapshot(&snap, &cats, &[]).unwrap();
         }

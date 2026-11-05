@@ -104,9 +104,9 @@ impl SnapshotDiffService {
         }
 
         // 按变化量绝对值降序排序
-        dir_diffs.sort_by(|a, b| b.delta().abs().cmp(&a.delta().abs()));
-        new_dirs_list.sort_by(|a, b| b.new_size.cmp(&a.new_size));
-        removed_dirs_list.sort_by(|a, b| b.old_size.cmp(&a.old_size));
+        dir_diffs.sort_by_key(|a| std::cmp::Reverse(a.delta().abs()));
+        new_dirs_list.sort_by_key(|a| std::cmp::Reverse(a.new_size));
+        removed_dirs_list.sort_by_key(|a| std::cmp::Reverse(a.old_size));
 
         (dir_diffs, new_dirs_list, removed_dirs_list)
     }
@@ -141,7 +141,7 @@ impl SnapshotDiffService {
         }
 
         // 按变化量绝对值降序排序
-        diffs.sort_by(|a, b| b.size_delta().abs().cmp(&a.size_delta().abs()));
+        diffs.sort_by_key(|a| std::cmp::Reverse(a.size_delta().abs()));
 
         diffs
     }
@@ -149,8 +149,9 @@ impl SnapshotDiffService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::Local;
+
+    use super::*;
 
     fn make_snapshot(path: &str, files: u64, dirs: u64, size: u64) -> ScanSnapshot {
         ScanSnapshot {

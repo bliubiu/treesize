@@ -1,4 +1,4 @@
-use egui::{Context, FontData, FontDefinitions, FontFamily, FontId, TextStyle};
+use egui::{Context, FontData, FontDefinitions, FontFamily};
 
 pub fn setup_chinese_fonts(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
@@ -6,25 +6,9 @@ pub fn setup_chinese_fonts(ctx: &Context) {
     load_chinese_font(&mut fonts);
     load_monospace_font(&mut fonts);
 
+    // 只负责注册字体族。字号与间距统一由 app.rs::apply_font_scale 每帧设置，
+    // 此处不再写死 text_styles，避免两套定义互相覆盖（此前 Body 18 会被覆盖成 16×scale）。
     ctx.set_fonts(fonts);
-
-    let mut style = (*ctx.style()).clone();
-    style
-        .text_styles
-        .insert(TextStyle::Body, FontId::new(18.0, FontFamily::Proportional));
-    style
-        .text_styles
-        .insert(TextStyle::Button, FontId::new(18.0, FontFamily::Proportional));
-    style
-        .text_styles
-        .insert(TextStyle::Small, FontId::new(16.0, FontFamily::Proportional));
-    style
-        .text_styles
-        .insert(TextStyle::Heading, FontId::new(22.0, FontFamily::Proportional));
-    style
-        .text_styles
-        .insert(TextStyle::Monospace, FontId::new(18.0, FontFamily::Monospace));
-    ctx.set_style(style);
 }
 
 fn load_monospace_font(fonts: &mut FontDefinitions) {

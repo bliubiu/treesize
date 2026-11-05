@@ -232,8 +232,9 @@ fn emit_html(args: &CliArgs, root: &FileNode, stats: &ScanStats) -> Result<()> {
 }
 
 fn emit_icicle_svg(args: &CliArgs, root: &FileNode, direction: application::IcicleDirection) -> Result<()> {
-    use application::{compute_layout_v2, render_svg, LayoutConfig};
     use std::path::PathBuf;
+
+    use application::{compute_layout_v2, render_svg, LayoutConfig};
 
     let config = LayoutConfig {
         direction,

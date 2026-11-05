@@ -11,7 +11,6 @@ use std::path::Path;
 
 use rayon::prelude::*;
 use thiserror::Error;
-
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 
 // ─── 手动定义的 IOCTL／常量 ──────────────────────────────────────────────
@@ -187,9 +186,7 @@ impl VolumeHandle {
     }
 
     #[inline]
-    fn raw(&self) -> HANDLE {
-        self.0
-    }
+    fn raw(&self) -> HANDLE { self.0 }
 }
 
 impl Drop for VolumeHandle {
@@ -203,9 +200,7 @@ impl Drop for VolumeHandle {
 }
 
 /// 当前进程是否有权限直读该卷的 MFT（用于引擎自动选择的可用性预检）
-pub fn can_read_mft(path: &Path) -> bool {
-    VolumeHandle::open(Path::new(&path_to_volume_device(path))).is_ok()
-}
+pub fn can_read_mft(path: &Path) -> bool { VolumeHandle::open(Path::new(&path_to_volume_device(path))).is_ok() }
 
 // ─── NTFS 卷信息 ────────────────────────────────────────────────────────────
 
@@ -220,9 +215,7 @@ pub struct VolumeInfo {
 }
 
 impl VolumeInfo {
-    pub fn bytes_per_cluster(&self) -> u64 {
-        self.bytes_per_sector as u64 * self.sectors_per_cluster as u64
-    }
+    pub fn bytes_per_cluster(&self) -> u64 { self.bytes_per_sector as u64 * self.sectors_per_cluster as u64 }
     pub fn mft_byte_offset(&self) -> u64 {
         let lcn = self.mft_start_lcn as u64;
         let cluster_size = self.bytes_per_cluster();
@@ -279,9 +272,7 @@ pub struct BootGeometry {
 }
 
 impl BootGeometry {
-    pub fn bytes_per_cluster(&self) -> u32 {
-        self.bytes_per_sector * self.sectors_per_cluster
-    }
+    pub fn bytes_per_cluster(&self) -> u32 { self.bytes_per_sector * self.sectors_per_cluster }
 
     /// 解码偏移 `0x40` 的 `clusters_per_mft_record`（i8）
     ///
@@ -425,9 +416,7 @@ fn volume_letter(path: &Path) -> char {
 /// 卷设备路径（如 "C:\Users" → `\\.\C:`）
 ///
 /// 这是 MFT 直读**唯一**可用的路径形式；`\\?\C:\` 只能做元数据 FSCTL。
-pub fn path_to_volume_device(path: &Path) -> OsString {
-    OsString::from(format!("\\\\.\\{}:", volume_letter(path)))
-}
+pub fn path_to_volume_device(path: &Path) -> OsString { OsString::from(format!("\\\\.\\{}:", volume_letter(path))) }
 
 // ─── MFT 原始数据读取 ──────────────────────────────────────────────────────
 
@@ -506,12 +495,7 @@ pub fn read_mft_raw(handle: &VolumeHandle, vol: &VolumeInfo, max_records: u64) -
 /// 卷设备句柄的 `ReadFile` 要求读取长度为扇区（`bytes_per_sector`）的倍数，
 /// 否则返回错误（诊断证据：所有失败读的长度均非 512 倍数）。
 /// 对齐请求走零拷贝快路径；非对齐请求整段填充至扇区倍数读取后回填。
-fn read_volume_span(
-    handle: &VolumeHandle,
-    offset: u64,
-    buf: &mut [u8],
-    sector: u64,
-) -> NtfsResult<()> {
+fn read_volume_span(handle: &VolumeHandle, offset: u64, buf: &mut [u8], sector: u64) -> NtfsResult<()> {
     if buf.is_empty() {
         return Ok(());
     }
@@ -593,8 +577,7 @@ fn extract_mft_runlist(record0: &[u8], _record_size: usize) -> NtfsResult<Vec<(u
             if ah.total_length < 64 {
                 break;
             }
-            let run_off =
-                off + u16::from_le_bytes([record0[off + 32], record0[off + 33]]) as usize;
+            let run_off = off + u16::from_le_bytes([record0[off + 32], record0[off + 33]]) as usize;
             let attr_end = off + ah.total_length as usize;
             return parse_runlist(record0, run_off, attr_end);
         }
@@ -603,7 +586,9 @@ fn extract_mft_runlist(record0: &[u8], _record_size: usize) -> NtfsResult<Vec<(u
         }
         off = next;
     }
-    Err(NtfsError::IndependentDecode("未能定位 $MFT 的 $DATA runlist".to_string()))
+    Err(NtfsError::IndependentDecode(
+        "未能定位 $MFT 的 $DATA runlist".to_string(),
+    ))
 }
 
 /// 解析 NTFS runlist（mapping pairs）
@@ -719,7 +704,7 @@ pub fn apply_fixup(rec: &mut [u8], usa_off: u16, usa_cnt: u16, sector_size: u16)
             break;
         }
         let val = u16::from_le_bytes([rec[fix], rec[fix + 1]]);
-        let se = (i as u16 * sector_size - 2) as usize;
+        let se = (i * sector_size - 2) as usize;
         if se + 2 > rec.len() {
             break;
         }
@@ -849,9 +834,7 @@ pub struct ParsedMftRecord {
 }
 
 /// 判断是否为 $BadClus（坏簇映射表）
-fn is_bad_clus(record_index: u64) -> bool {
-    record_index == BAD_CLUS_RECORD
-}
+fn is_bad_clus(record_index: u64) -> bool { record_index == BAD_CLUS_RECORD }
 
 /// 解析 $ATTRIBUTE_LIST 属性值（ATTRIBUTE_LIST_ENTRY 链）
 ///
@@ -879,11 +862,7 @@ fn parse_attr_list(value: &[u8], record_index: u64) -> (Vec<u64>, Option<u64>) {
         let target = u64::from_le_bytes(value[off + 16..off + 24].try_into().unwrap()) & 0x0000_FFFF_FFFF_FFFF;
         if target != record_index {
             refs.push(target);
-            if data_ext_ref.is_none()
-                && etype == 0x80
-                && name_len == 0
-                && lowest_vcn == 0
-            {
+            if data_ext_ref.is_none() && etype == 0x80 && name_len == 0 && lowest_vcn == 0 {
                 data_ext_ref = Some(target);
             }
         }
@@ -983,14 +962,13 @@ pub fn parse_mft_record(data: &[u8], record_index: u64) -> NtfsResult<Option<Par
                     }
                 }
             },
-            Some(AttributeType::Data) => {
+            Some(AttributeType::Data)
                 // 排除命名流（ADS）的驻留 $DATA
-                if ah.name_length == 0 && result.data_real_size.is_none() {
+                if ah.name_length == 0 && result.data_real_size.is_none() => {
                     if let Ok(val) = get_resident_value(rec, attr_body_start, &ah) {
                         result.data_real_size = Some(val.len() as u64);
                     }
-                }
-            },
+                },
             _ => {},
         }
         off = next;
@@ -1093,14 +1071,13 @@ fn parse_mft_record_mut(data: &mut [u8], record_index: u64) -> NtfsResult<Option
                     }
                 }
             },
-            Some(AttributeType::Data) => {
+            Some(AttributeType::Data)
                 // 排除命名流（ADS）的驻留 $DATA
-                if ah.name_length == 0 && result.data_real_size.is_none() {
+                if ah.name_length == 0 && result.data_real_size.is_none() => {
                     if let Ok(val) = get_resident_value(data, attr_body_start, &ah) {
                         result.data_real_size = Some(val.len() as u64);
                     }
-                }
-            },
+                },
             _ => {},
         }
         off = next;
@@ -1185,13 +1162,10 @@ pub fn transfer_ext_data_sizes(records: &mut [ParsedMftRecord]) {
         return;
     }
 
-    let mut ext_map: std::collections::HashMap<u64, (Option<u64>, Option<u64>)> =
-        std::collections::HashMap::new();
+    let mut ext_map: std::collections::HashMap<u64, (Option<u64>, Option<u64>)> = std::collections::HashMap::new();
     // 扩展记录本身同样排除 stub（real>0 才可信，防止空尺寸覆盖真值）
     for rec in records.iter() {
-        if want.contains(&rec.header.record_number)
-            && matches!(rec.data_real_size, Some(v) if v > 0)
-        {
+        if want.contains(&rec.header.record_number) && matches!(rec.data_real_size, Some(v) if v > 0) {
             ext_map.insert(rec.header.record_number, (rec.data_allocated_size, rec.data_real_size));
         }
     }
@@ -1221,9 +1195,7 @@ pub fn transfer_ext_data_sizes(records: &mut [ParsedMftRecord]) {
                         if real.is_some_and(|v| v > 0) {
                             rec.data_real_size = *real;
                         }
-                        if rec.data_allocated_size.is_none()
-                            && alloc.is_some_and(|v| v > 0)
-                        {
+                        if rec.data_allocated_size.is_none() && alloc.is_some_and(|v| v > 0) {
                             rec.data_allocated_size = *alloc;
                         }
                     },
@@ -1248,7 +1220,7 @@ pub fn resolve_nonresident_attr_lists(
     vol: &VolumeInfo,
     records: &mut [ParsedMftRecord],
 ) -> usize {
-    let cluster_size = vol.bytes_per_cluster() as u64;
+    let cluster_size = vol.bytes_per_cluster();
     if cluster_size == 0 {
         return 0;
     }
@@ -1345,10 +1317,7 @@ pub fn resolve_nonresident_attr_lists(
 ///
 /// `apparent_size = true` 取真实长度（$DATA 0x30），
 /// 默认取分配大小（$DATA 0x28，占用空间，与 Fs 引擎口径一致）。
-pub fn build_size_map(
-    parsed: &[ParsedMftRecord],
-    apparent_size: bool,
-) -> std::collections::HashMap<u64, u64> {
+pub fn build_size_map(parsed: &[ParsedMftRecord], apparent_size: bool) -> std::collections::HashMap<u64, u64> {
     parsed
         .iter()
         .map(|rec| (rec.header.record_number, select_record_size(rec, apparent_size)))
@@ -1471,7 +1440,7 @@ pub fn read_usn_records(
     since_usn: i64,
     max_records: u32,
 ) -> NtfsResult<Vec<UsnRecord>> {
-    let mut input = vec![0u8; 40];
+    let mut input = [0u8; 40];
     input[0..8].copy_from_slice(&since_usn.to_le_bytes());
     input[8..12].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
     input[12..16].copy_from_slice(&0u32.to_le_bytes());

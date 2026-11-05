@@ -189,9 +189,7 @@ impl Default for CliArgs {
 
 // LogLevel 需要实现 ValueEnum
 impl clap::ValueEnum for LogLevel {
-    fn value_variants<'a>() -> &'a [Self] {
-        &[Self::Debug, Self::Info, Self::Error]
-    }
+    fn value_variants<'a>() -> &'a [Self] { &[Self::Debug, Self::Info, Self::Error] }
 
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
         match self {

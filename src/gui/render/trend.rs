@@ -202,7 +202,7 @@ pub(crate) fn trend_line_chart(ui: &mut egui::Ui, trend: &TrendReport, theme: &T
     }
 
     let size = ui.available_size();
-    let chart_height = (size.y * 0.6).max(160.0).min(400.0);
+    let chart_height = (size.y * 0.6).clamp(160.0, 400.0);
     let (rect, _response) = ui.allocate_exact_size(Vec2::new(size.x, chart_height), egui::Sense::hover());
 
     let painter = ui.painter();
@@ -305,7 +305,12 @@ pub(crate) fn trend_line_chart(ui: &mut egui::Ui, trend: &TrendReport, theme: &T
 /// 完整的趋势面板：统计卡片 + 趋势图 + 快照对比
 pub(crate) fn render_trend_panel(ui: &mut egui::Ui, trend: &TrendReport, theme: &ThemeColors) {
     if trend.size_trend.is_empty() {
-        widgets::render_empty_state(ui, "暂无扫描历史", "还没有该路径的历史记录，完成一次扫描后自动生成");
+        widgets::render_empty_state(
+            ui,
+            theme,
+            "暂无扫描历史",
+            "还没有该路径的历史记录，完成一次扫描后自动生成",
+        );
         return;
     }
 

@@ -5,10 +5,31 @@ use egui::{Color32, Vec2};
 use crate::application::classify_service::ClassifyReport;
 use crate::application::duplicate_service::DuplicateReport;
 use crate::application::TopNEntry;
+use crate::domain::value_objects::FileCategory;
 use crate::domain::FileNode;
 use crate::gui::app::Snapshot;
 use crate::gui::theme::ThemeColors;
 use crate::gui::widgets;
+
+/// 签名条 / 图例分段着色。
+///
+/// 目录段使用专用色板（按位置循环取色），避免原本「全部灰青 + 奇偶变暗 15%」导致的相邻目录段难以区分；
+/// 文件段沿用分类色。条与图例使用同一函数、同一 `index`，保证两者配色一致。
+fn signature_segment_color(is_dir: bool, category: FileCategory, index: usize) -> [u8; 3] {
+    if is_dir {
+        const DIR_PALETTE: [[u8; 3]; 6] = [
+            [0, 151, 167],   // 青（accent_dim）
+            [63, 81, 181],   // 靛蓝
+            [121, 134, 203], // 柔蓝
+            [38, 166, 154],  // 青绿
+            [79, 195, 247],  // 天蓝
+            [149, 117, 205], // 紫
+        ];
+        DIR_PALETTE[index % DIR_PALETTE.len()]
+    } else {
+        category.base_color()
+    }
+}
 
 /// 渲染仪表盘主面板
 pub(crate) fn render_dashboard(
@@ -22,7 +43,7 @@ pub(crate) fn render_dashboard(
     cached_classify: &Option<ClassifyReport>,
 ) {
     if state.node.is_none() {
-        widgets::render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
+        widgets::render_empty_state(ui, theme, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
         return;
     }
     let node = state.node.as_ref().unwrap();
@@ -44,6 +65,12 @@ pub(crate) fn render_dashboard(
 
         ui.add_space(8.0);
 
+        // ── 卷级对账（仅卷根扫描有数据）──
+        if let Some(r) = &state.reconciliation {
+            render_volume_reconciliation(ui, r, theme);
+            ui.add_space(8.0);
+        }
+
         // ── 签名元素：Top 8 堆叠条 ──
         render_signature_bar(ui, node, theme, dashboard_hover);
 
@@ -58,6 +85,120 @@ pub(crate) fn render_dashboard(
             cached_duplicates,
             cached_classify,
         );
+    });
+}
+
+/// 卷级对账卡片：把「卷已用空间」与「本次扫描计入」摆在一起，解释差额来源。
+///
+/// 只在 `Snapshot.reconciliation` 有值时渲染（扫描根为卷根）。
+/// 数字一律不改，只做展示与解释；不可读目录明细用折叠面板，避免上百条刷屏。
+fn render_volume_reconciliation(
+    ui: &mut egui::Ui,
+    r: &crate::infrastructure::VolumeReconciliation,
+    theme: &ThemeColors,
+) {
+    let frame = egui::Frame::none()
+        .fill(theme.bg_card)
+        .rounding(egui::Rounding::same(4.0))
+        .stroke(egui::Stroke::new(1.0_f32, theme.border))
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0));
+
+    frame.show(ui, |ui| {
+        ui.heading(
+            egui::RichText::new(format!("卷级对账 · {}", r.volume_root))
+                .color(theme.text_primary)
+                .strong(),
+        );
+        ui.add_space(4.0);
+
+        let size = |b: u64| crate::domain::value_objects::ByteSize(b).to_string();
+        egui::Grid::new("volume_reconcile_grid")
+            .num_columns(2)
+            .spacing([16.0, 3.0])
+            .show(ui, |ui| {
+                let rows = [
+                    ("卷总容量", size(r.total_bytes)),
+                    ("卷已用空间", size(r.used_bytes)),
+                    ("卷空闲空间", size(r.free_bytes)),
+                    (
+                        "本次计入",
+                        format!("{}（{}）", size(r.accounted_bytes), r.basis_label()),
+                    ),
+                ];
+                for (label, value) in rows {
+                    ui.label(egui::RichText::new(label).color(theme.text_secondary));
+                    ui.label(egui::RichText::new(value).color(theme.text_primary));
+                    ui.end_row();
+                }
+
+                // 少算用警示黄、多算用危险红、完全一致用成功绿
+                let gap_color = if r.gap_bytes > 0 {
+                    theme.warn
+                } else if r.gap_bytes < 0 {
+                    theme.danger
+                } else {
+                    theme.success
+                };
+                ui.label(egui::RichText::new(r.gap_label()).color(theme.text_secondary));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}（覆盖率 {:.1}%）",
+                        size(r.gap_abs()),
+                        r.coverage_percent()
+                    ))
+                    .color(gap_color)
+                    .strong(),
+                );
+                ui.end_row();
+            });
+
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "差额不等于扫描出错：卷已用空间还含文件系统元数据、卷影副本/还原点、权限拒绝或独占打开的系统文件；硬链接重复计数则会使计入偏大。",
+            )
+            .color(theme.text_secondary)
+            .small(),
+        );
+
+        if r.total_unreadable > 0 {
+            egui::CollapsingHeader::new(
+                egui::RichText::new(format!("不可读目录：{} 个（点击展开）", r.total_unreadable))
+                    .color(theme.warn),
+            )
+            .id_source("volume_unreadable_dirs")
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .id_source("volume_unreadable_scroll")
+                    .show(ui, |ui| {
+                        for entry in &r.unreadable {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(entry.path.as_str())
+                                        .color(theme.text_primary)
+                                        .small(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(entry.reason.as_str())
+                                        .color(theme.text_secondary)
+                                        .small(),
+                                );
+                            });
+                        }
+                        if r.total_unreadable > r.unreadable.len() {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "... 另有 {} 个未列出",
+                                    r.total_unreadable - r.unreadable.len()
+                                ))
+                                .color(theme.text_secondary)
+                                .small(),
+                            );
+                        }
+                    });
+            });
+        }
     });
 }
 
@@ -77,12 +218,12 @@ fn render_signature_bar(ui: &mut egui::Ui, node: &FileNode, theme: &ThemeColors,
 
     // 取 Top 8 子项（目录与文件混合）
     let mut children: Vec<&FileNode> = node.children.iter().filter(|c| c.size.0 > 0).collect();
-    children.sort_by(|a, b| b.size.cmp(&a.size));
+    children.sort_by_key(|a| std::cmp::Reverse(a.size));
     children.truncate(8);
 
     let total: u64 = children.iter().map(|c| c.size.0).sum();
     if total == 0 {
-        widgets::render_empty_state(ui, "暂无数据", "当前目录下没有可统计的文件");
+        widgets::render_empty_state(ui, theme, "暂无数据", "当前目录下没有可统计的文件");
         return;
     }
 
@@ -99,20 +240,8 @@ fn render_signature_bar(ui: &mut egui::Ui, node: &FileNode, theme: &ThemeColors,
         let ratio = child.size.0 as f32 / total as f32;
         let w = (ratio * rect.width()).max(2.0);
         let seg_rect = egui::Rect::from_min_size(egui::pos2(x, rect.min.y), Vec2::new(w, bar_height));
-        let [r, g, b] = if child.is_dir() {
-            crate::domain::value_objects::FileCategory::Other.base_color()
-        } else {
-            child.category.base_color()
-        };
-        let color = if i % 2 == 0 {
-            Color32::from_rgb(r, g, b)
-        } else {
-            Color32::from_rgb(
-                (r as f32 * 0.85) as u8,
-                (g as f32 * 0.85) as u8,
-                (b as f32 * 0.85) as u8,
-            )
-        };
+        let [r, g, b] = signature_segment_color(child.is_dir(), child.category, i);
+        let color = Color32::from_rgb(r, g, b);
         painter.rect_filled(seg_rect, 0.0, color);
 
         if let Some(pos) = response.hover_pos() {
@@ -157,20 +286,8 @@ fn render_signature_bar(ui: &mut egui::Ui, node: &FileNode, theme: &ThemeColors,
         .spacing([16.0, 3.0])
         .show(ui, |ui| {
             for (i, child) in children.iter().enumerate() {
-                let [r, g, b] = if child.is_dir() {
-                    crate::domain::value_objects::FileCategory::Other.base_color()
-                } else {
-                    child.category.base_color()
-                };
-                let color = if i % 2 == 0 {
-                    Color32::from_rgb(r, g, b)
-                } else {
-                    Color32::from_rgb(
-                        (r as f32 * 0.85) as u8,
-                        (g as f32 * 0.85) as u8,
-                        (b as f32 * 0.85) as u8,
-                    )
-                };
+                let [r, g, b] = signature_segment_color(child.is_dir(), child.category, i);
+                let color = Color32::from_rgb(r, g, b);
                 let percent = (child.size.0 as f64 / node.size.0 as f64) * 100.0;
                 ui.horizontal(|ui| {
                     widgets::painter_dot_color(ui, color);
@@ -249,7 +366,7 @@ fn render_quick_insights(
                         ui.end_row();
                     }
 
-                    // 重复文件
+                    // 重复文件（仅「重复文件」页触发计算，Dashboard 不自动算）
                     if let Some(report) = cached_duplicates {
                         if report.groups.is_empty() {
                             ui.label(egui::RichText::new("重复文件").color(theme.text_secondary));
@@ -263,6 +380,11 @@ fn render_quick_insights(
                                 );
                             });
                         }
+                        ui.end_row();
+                    } else {
+                        // 未分析（用户尚未切换到「重复文件」页）：给出引导，而非整行消失
+                        ui.label(egui::RichText::new("重复文件").color(theme.text_secondary));
+                        ui.label(egui::RichText::new("未分析（切换到「重复文件」页）").color(theme.text_dim));
                         ui.end_row();
                     }
 

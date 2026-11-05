@@ -143,6 +143,19 @@
     对记录 8 跳过大小解析；条目本身保留（树中显示 0 B，与其他元文件一致）
   - 提权复扫实测：总量 245.48 → **99.00 GiB**，
     与 Fs 引擎口径（106.73 GiB 含权限错误目录缺口）对齐
+- **Dashboard 不再自动触发重复文件哈希（消除空闲态高频轮询空转）**
+  - 之前 `refresh_cache` 在 Dashboard 页把「重复文件」哈希与快速聚合放进同一判定：
+    整卷扫描后 `DuplicateService::scan` 全量内容哈希需数分钟，哈希未完导致
+    `cache_computing` 恒真、UI 退化为 50ms 轮询空转（空闲 CPU 长期 24–63%），
+    且「最大文件 / 最大目录 / 主要类型」等毫秒级洞察也被慢哈希阻塞、一直显示「计算中…」。
+  - **改法**：把"是否触发重复文件计算"抽成纯函数 `compute_cache_plan`，
+    其 `needs_dup` **仅由「重复文件」页触发**，Dashboard 不再自动算。
+    快速聚合（TopN / 分类 / 大文件 / 可清理）与重复哈希走两条独立后台线程，
+    互不覆盖、互不阻塞；`control_frame_rate` 仅当两路都收敛才回空闲。
+  - Dashboard 的「重复文件」洞察行：未分析时显示
+    「未分析（切换到「重复文件」页）」引导，而非整行消失。
+  - 新增单元测试 `dashboard_fast_plan_ignores_duplicates` 守护该契约：
+    若有人把 duplicates 重新塞回 Dashboard 触发条件，测试立即失败。
 
 ### 已知问题
 
@@ -151,8 +164,13 @@
   `ERROR_ACCESS_DENIED`，无法提权。已验证的是引导扇区解析（6 个纯函数单元测试）、
   路径构造、权限预检、错误映射与引擎回落；`read_mft_raw → parse_mft_records →
   build_tree` 这条链仍需在管理员会话下与 Fs 引擎对账。
-- 存在 66 条既有 clippy warning（`ntfs_reader.rs` 可折叠的 `if`、`vec!` 可换数组；
-  `scan_engine.rs` 的 `impl Default` 可派生），本轮只清除了 error，未改动这些无关代码。
+- 代码层 lint 已清零：`cargo clippy --all-targets` 除 glutin/winit 上游
+  future-incompat 提示外无任何代码警告（历史遗留的 66 条 `ntfs_reader` /
+  `scan_engine` 可派生项已在本轮一并清理）。
+- **实时 GUI 真机复验受当前沙箱策略限制**：应用读取系统主题会触发被禁用的
+  `reg.exe`，无法在本会话启动窗口截屏目视。逻辑修复由单元 / 集成测试覆盖
+  （`cargo test` 全绿），卷级对账、Treemap、设置等视觉项已在策略允许时段的
+  前序会话完成截图验证。
 
 ### 性能
 

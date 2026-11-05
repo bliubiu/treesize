@@ -14,9 +14,10 @@ use super::file_node::FileNode;
 use super::value_objects::ByteSize;
 
 /// 扫描引擎类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ScanEngineType {
     /// 自动选择：NTFS 卷使用 MFT，非 NTFS 使用 Fs
+    #[default]
     Auto,
     /// Fs 引擎：目录枚举并行遍历（跨平台）
     Fs,
@@ -26,12 +27,6 @@ pub enum ScanEngineType {
     /// USN Journal 增量扫描（仅 Windows NTFS）
     #[cfg(target_os = "windows")]
     Usn,
-}
-
-impl Default for ScanEngineType {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl ScanOptions {
@@ -160,7 +155,7 @@ impl Default for ScanOptions {
 }
 
 /// 扫描进度回调载荷
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ScanProgress {
     /// 已扫描的文件数
     pub files_scanned: u64,
@@ -170,17 +165,6 @@ pub struct ScanProgress {
     pub current_path: String,
     /// 累计已扫描字节数
     pub bytes_scanned: u64,
-}
-
-impl Default for ScanProgress {
-    fn default() -> Self {
-        Self {
-            files_scanned: 0,
-            dirs_scanned: 0,
-            current_path: String::new(),
-            bytes_scanned: 0,
-        }
-    }
 }
 
 /// 扫描统计汇总
@@ -205,17 +189,11 @@ pub struct CancelToken {
 }
 
 impl CancelToken {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
-    }
+    pub fn cancel(&self) { self.cancelled.store(true, Ordering::Relaxed); }
 
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
-    }
+    pub fn is_cancelled(&self) -> bool { self.cancelled.load(Ordering::Relaxed) }
 }
 
 /// 扫描引擎领域接口
@@ -249,9 +227,7 @@ pub(crate) mod testing {
     }
 
     impl MockScanEngine {
-        pub fn new(tree: FileNode) -> Self {
-            Self { tree: Some(tree) }
-        }
+        pub fn new(tree: FileNode) -> Self { Self { tree: Some(tree) } }
     }
 
     impl ScanEngine for MockScanEngine {

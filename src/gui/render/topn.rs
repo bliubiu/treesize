@@ -20,12 +20,12 @@ pub(crate) fn render_topn(
     cached_all_files: &Option<Vec<TopNEntry>>,
 ) -> Option<TopFilesSortBy> {
     if state.node.is_none() {
-        widgets::render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
+        widgets::render_empty_state(ui, theme, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
         return None;
     }
 
     if cached_all_files.is_none() {
-        widgets::render_empty_state(ui, "正在准备数据…", "请稍候，正在构建文件列表缓存");
+        widgets::render_empty_state(ui, theme, "正在准备数据…", "请稍候，正在构建文件列表缓存");
         return None;
     }
 
@@ -83,12 +83,10 @@ pub(crate) fn render_topn(
     let mut sorted = filtered;
     let current_sort = sort_by.clone();
     match current_sort {
-        TopFilesSortBy::SizeDesc => sorted.sort_by(|a, b| b.size.cmp(&a.size)),
-        TopFilesSortBy::SizeAsc => sorted.sort_by(|a, b| a.size.cmp(&b.size)),
-        TopFilesSortBy::NameAsc => sorted.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())),
-        TopFilesSortBy::NameDesc => {
-            sorted.sort_by(|a, b| b.name.to_ascii_lowercase().cmp(&a.name.to_ascii_lowercase()))
-        },
+        TopFilesSortBy::SizeDesc => sorted.sort_by_key(|a| std::cmp::Reverse(a.size)),
+        TopFilesSortBy::SizeAsc => sorted.sort_by_key(|a| a.size),
+        TopFilesSortBy::NameAsc => sorted.sort_by_key(|a| a.name.to_ascii_lowercase()),
+        TopFilesSortBy::NameDesc => sorted.sort_by_key(|a| std::cmp::Reverse(a.name.to_ascii_lowercase())),
         TopFilesSortBy::PercentDesc => {
             sorted.sort_by(|a, b| b.percent.partial_cmp(&a.percent).unwrap_or(std::cmp::Ordering::Equal))
         },

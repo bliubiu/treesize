@@ -11,6 +11,8 @@ pub mod fs_scanner;
 pub mod history_storage;
 pub mod logging;
 pub mod memory_monitor;
+pub mod scan_diagnostics;
+pub mod volume_usage;
 
 // Windows 快速目录枚举（FileIdExtdDirectoryInfo）
 #[cfg(target_os = "windows")]
@@ -27,11 +29,11 @@ pub mod usn_scanner;
 pub use fs_scanner::FsScanEngine;
 pub use history_storage::HistoryStorage;
 pub use memory_monitor::MemoryMonitor;
-
 #[cfg(target_os = "windows")]
 pub use mft_scanner::MftScanEngine;
 #[cfg(target_os = "windows")]
 pub use usn_scanner::UsnScanEngine;
+pub use volume_usage::{is_volume_root, reconcile, UnreadableDir, VolumeReconciliation};
 
 /// 根据扫描路径所在的文件系统智能选择最佳扫描引擎
 ///

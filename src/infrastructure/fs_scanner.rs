@@ -25,6 +25,7 @@ use crate::domain::scan_engine::{
 };
 use crate::infrastructure::dir_reader::{self, RawEntry};
 use crate::infrastructure::memory_monitor::MemoryMonitor;
+use crate::infrastructure::scan_diagnostics;
 
 /// 累计这么多条目才把计数刷进共享原子量
 ///
@@ -36,15 +37,11 @@ const FLUSH_EVERY: usize = 1024;
 pub struct FsScanEngine;
 
 impl FsScanEngine {
-    pub fn new() -> Self {
-        Self
-    }
+    pub fn new() -> Self { Self }
 }
 
 impl Default for FsScanEngine {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl ScanEngine for FsScanEngine {
@@ -55,6 +52,9 @@ impl ScanEngine for FsScanEngine {
         progress: Option<&(dyn Fn(&ScanProgress) + Send + Sync)>,
         cancel: Option<&CancelToken>,
     ) -> Result<FileNode> {
+        // 开始一次新扫描：清空上一次的不可读目录诊断，供卷级对账取用
+        scan_diagnostics::begin(&root);
+
         // 检查根路径是否存在
         let meta = std::fs::metadata(&root).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -243,14 +243,10 @@ struct WalkCtx<'a> {
 }
 
 impl<'a> WalkCtx<'a> {
-    fn cancelled(&self) -> bool {
-        self.cancel.is_some_and(CancelToken::is_cancelled)
-    }
+    fn cancelled(&self) -> bool { self.cancel.is_some_and(CancelToken::is_cancelled) }
 
     /// 已收到取消或已出现致命错误
-    fn stopping(&self) -> bool {
-        self.cancelled() || self.fatal.lock().is_ok_and(|f| f.is_some())
-    }
+    fn stopping(&self) -> bool { self.cancelled() || self.fatal.lock().is_ok_and(|f| f.is_some()) }
 
     /// 记录首个致命错误
     fn set_fatal(&self, error: DomainError) {
@@ -341,6 +337,7 @@ fn walk<'scope>(scope: &Scope<'scope>, ctx: &'scope WalkCtx<'scope>, dir: PathBu
                     Ok(raw) => raw,
                     Err(error) => {
                         ctx.stats.errors.fetch_add(1, Ordering::Relaxed);
+                        scan_diagnostics::record_unreadable(&dir, &error.to_string());
                         // 权限相关的错误降级为 debug，避免刷屏（如回收站、系统目录）
                         tracing::debug!(
                             target: "treesize::scanner",
@@ -369,6 +366,7 @@ fn walk<'scope>(scope: &Scope<'scope>, ctx: &'scope WalkCtx<'scope>, dir: PathBu
         },
         Err(error) => {
             ctx.stats.errors.fetch_add(1, Ordering::Relaxed);
+            scan_diagnostics::record_unreadable(&dir, &error.to_string());
             // 目录不可读不是致命错误：计数后继续扫别处
             tracing::debug!(
                 target: "treesize::scanner",
@@ -557,17 +555,34 @@ fn build_tree(
         }
     }
 
-    tracing::debug!(target: "treesize::scanner", "build_tree 完成: 根节点子节点数={}, 剩余未挂载节点={}",
-        nodes[0].as_ref().unwrap().children.len(), nodes.len() - 1);
+    // 挂载循环结束后仍为 Some 的条目才是真正「未挂载」的节点。
+    // 旧日志直接打印 nodes.len()-1（总条目数），会掩盖节点丢失导致的大小少算。
+    let unmounted = nodes[1..].iter().filter(|n| n.is_some()).count();
+    if unmounted > 0 {
+        tracing::warn!(
+            target: "treesize::scanner",
+            "build_tree 有 {} 个节点未挂载到父节点，其大小不会计入统计",
+            unmounted,
+        );
+    }
+    tracing::debug!(
+        target: "treesize::scanner",
+        "build_tree 完成: 根节点子节点数={}, 总条目数={}, 未挂载节点={}",
+        nodes[0].as_ref().unwrap().children.len(),
+        nodes.len() - 1,
+        unmounted,
+    );
 
     nodes.swap_remove(0).unwrap()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::tempdir;
+
+    use super::*;
 
     fn test_options() -> ScanOptions {
         ScanOptions {

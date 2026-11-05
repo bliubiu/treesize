@@ -72,9 +72,7 @@ pub struct DirDiff {
 
 impl DirDiff {
     /// 变化量（字节），正数为增长，负数为缩小
-    pub fn delta(&self) -> i64 {
-        self.new_size as i64 - self.old_size as i64
-    }
+    pub fn delta(&self) -> i64 { self.new_size as i64 - self.old_size as i64 }
 
     /// 变化率（百分比）
     pub fn delta_pct(&self) -> f64 {
@@ -106,13 +104,9 @@ pub struct CategoryDiff {
 }
 
 impl CategoryDiff {
-    pub fn size_delta(&self) -> i64 {
-        self.new_size as i64 - self.old_size as i64
-    }
+    pub fn size_delta(&self) -> i64 { self.new_size as i64 - self.old_size as i64 }
 
-    pub fn count_delta(&self) -> i64 {
-        self.new_count as i64 - self.old_count as i64
-    }
+    pub fn count_delta(&self) -> i64 { self.new_count as i64 - self.old_count as i64 }
 }
 
 /// 快照对比报告
@@ -183,7 +177,7 @@ pub fn compute_top_growing(snapshots: &[ScanSnapshot], dirs_by_scan: &[Vec<DirSi
         .filter(|e| e.growth_bytes > 0)
         .collect();
 
-    entries.sort_by(|a, b| b.growth_bytes.cmp(&a.growth_bytes));
+    entries.sort_by_key(|a| std::cmp::Reverse(a.growth_bytes));
     entries.truncate(10);
     entries
 }

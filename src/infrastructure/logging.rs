@@ -12,23 +12,20 @@ use serde::{Deserialize, Serialize};
 use tracing_core::{Event, Subscriber};
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::FmtContext;
+use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter};
 
 // ─── 日志级别 ──────────────────────────────────────────────────────────────
 
 /// 日志级别
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LogLevel {
     Debug,
+    #[default]
     Info,
     Error,
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        Self::Info
-    }
 }
 
 impl LogLevel {
@@ -86,9 +83,7 @@ impl DailyLogRotator {
 }
 
 impl Write for DailyLogRotator {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.get_file()?.write(buf)
-    }
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.get_file()?.write(buf) }
 
     fn flush(&mut self) -> io::Result<()> {
         if let Some(ref mut file) = self.file {
@@ -259,10 +254,12 @@ fn cleanup_old_logs(log_dir: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
     use std::io::Write;
+
     use tempfile::tempdir;
+
+    use super::*;
 
     // ── LogLevel ───────────────────────────────────────────────────────
 
@@ -343,7 +340,7 @@ mod tests {
         rotator.flush().unwrap();
 
         let today = chrono::Local::now().format("%Y%m%d").to_string();
-        let content = fs::read_to_string(&log_dir.join(format!("treesize-{today}.log"))).unwrap();
+        let content = fs::read_to_string(log_dir.join(format!("treesize-{today}.log"))).unwrap();
         assert_eq!(content, "hello world");
     }
 

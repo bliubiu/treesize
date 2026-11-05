@@ -80,7 +80,7 @@ impl ClassifyService {
                 percent: percent(*cat_size.get(&cat).unwrap_or(&0), total_size),
             })
             .collect();
-        by_category.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+        by_category.sort_by_key(|a| std::cmp::Reverse(a.total_size));
 
         let mut by_extension: Vec<ExtensionStat> = ext_files
             .into_iter()
@@ -91,7 +91,7 @@ impl ClassifyService {
                 extension: ext,
             })
             .collect();
-        by_extension.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+        by_extension.sort_by_key(|a| std::cmp::Reverse(a.total_size));
 
         ClassifyReport {
             by_category,
@@ -112,8 +112,9 @@ fn percent(part: u64, total: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     fn build_tree() -> FileNode {
         let mut root = FileNode::new_dir(PathBuf::from("/root"), None);

@@ -14,29 +14,17 @@ use serde::{Deserialize, Serialize};
 pub struct ByteSize(pub u64);
 
 impl ByteSize {
-    pub const fn from_bytes(b: u64) -> Self {
-        Self(b)
-    }
+    pub const fn from_bytes(b: u64) -> Self { Self(b) }
 
-    pub const fn bytes(self) -> u64 {
-        self.0
-    }
+    pub const fn bytes(self) -> u64 { self.0 }
 
-    pub const fn kib(self) -> f64 {
-        self.0 as f64 / 1024.0
-    }
+    pub const fn kib(self) -> f64 { self.0 as f64 / 1024.0 }
 
-    pub const fn mib(self) -> f64 {
-        self.kib() / 1024.0
-    }
+    pub const fn mib(self) -> f64 { self.kib() / 1024.0 }
 
-    pub const fn gib(self) -> f64 {
-        self.mib() / 1024.0
-    }
+    pub const fn gib(self) -> f64 { self.mib() / 1024.0 }
 
-    pub const fn tib(self) -> f64 {
-        self.gib() / 1024.0
-    }
+    pub const fn tib(self) -> f64 { self.gib() / 1024.0 }
 
     /// 人类可读的二进制单位字符串，例如 `1.23 GiB`。
     pub fn human_readable(self) -> String {
@@ -56,15 +44,11 @@ impl ByteSize {
 }
 
 impl fmt::Display for ByteSize {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.human_readable())
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.human_readable()) }
 }
 
 impl From<u64> for ByteSize {
-    fn from(v: u64) -> Self {
-        Self(v)
-    }
+    fn from(v: u64) -> Self { Self(v) }
 }
 
 /// 文件大类，用于分类统计与 Treemap 着色
@@ -176,12 +160,15 @@ pub fn normalize_extension(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 取文件名（含目录），失败返回空字符串
+/// 取文件名（含目录）。
+///
+/// 盘符根 / 文件系统根（如 `C:\`、`/`）没有 `file_name()`，
+/// 此时回退显示完整路径，避免树形图、Treemap 的根节点名称为空。
 pub fn file_name(path: &Path) -> String {
     path.file_name()
         .and_then(|n| n.to_str())
         .map(|s| s.to_string())
-        .unwrap_or_default()
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

@@ -36,8 +36,8 @@ pub(crate) fn _render_collect(
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if !items.is_empty() {
                     let marked = items.iter().filter(|i| i.marked_for_deletion).count();
-                    if marked > 0 {
-                        if ui
+                    if marked > 0
+                        && ui
                             .add(
                                 egui::Button::new(
                                     egui::RichText::new(format!("删除已标记（{}）", marked)).color(Color32::WHITE),
@@ -45,9 +45,8 @@ pub(crate) fn _render_collect(
                                 .fill(theme.danger),
                             )
                             .clicked()
-                        {
-                            (delegates.delete_marked)();
-                        }
+                    {
+                        (delegates.delete_marked)();
                     }
                     if ui.button("清空全部").clicked() {
                         items.clear();
@@ -62,6 +61,7 @@ pub(crate) fn _render_collect(
             ui.add_space(20.0);
             widgets::render_empty_state(
                 ui,
+                theme,
                 "暂无收集文件",
                 "点击上方「添加目录」或「添加文件」按钮选择要管理的项目",
             );

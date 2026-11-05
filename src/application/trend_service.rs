@@ -13,7 +13,7 @@ pub struct TrendService;
 impl TrendService {
     /// 从扫描结果构建快照数据
     pub fn build_snapshot(
-        path: &std::path::PathBuf,
+        path: &std::path::Path,
         node: &FileNode,
         elapsed_ms: u64,
     ) -> (ScanSnapshot, Vec<CategorySnapshot>, Vec<DirSizeSnapshot>) {
@@ -47,7 +47,7 @@ impl TrendService {
                 size: c.size.0,
             })
             .collect();
-        dirs.sort_by(|a, b| b.size.cmp(&a.size));
+        dirs.sort_by_key(|a| std::cmp::Reverse(a.size));
 
         (snapshot, categories, dirs)
     }
@@ -120,10 +120,11 @@ impl TrendService {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::domain::file_node::FileNode;
     use crate::domain::scan_history::CategorySnapshot;
-    use std::path::PathBuf;
 
     fn build_test_tree() -> FileNode {
         let mut root = FileNode::new_dir(PathBuf::from("/test"), None);

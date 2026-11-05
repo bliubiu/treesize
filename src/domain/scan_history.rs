@@ -2,7 +2,7 @@
 //!
 //! 定义扫描快照等核心领域实体，用于"空间增长趋势"跟踪。
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
@@ -48,7 +48,7 @@ pub struct DirSizeSnapshot {
 
 impl ScanSnapshot {
     /// 创建新快照
-    pub fn new(scanned_path: &PathBuf, total_files: u64, total_dirs: u64, total_size: u64, elapsed_ms: u64) -> Self {
+    pub fn new(scanned_path: &Path, total_files: u64, total_dirs: u64, total_size: u64, elapsed_ms: u64) -> Self {
         Self {
             id: None,
             scanned_path: scanned_path.to_string_lossy().to_string(),

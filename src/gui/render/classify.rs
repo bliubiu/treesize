@@ -15,11 +15,11 @@ pub(crate) fn render_classify(
     cached_classify: &Option<ClassifyReport>,
 ) {
     if state.node.is_none() {
-        widgets::render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
+        widgets::render_empty_state(ui, theme, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
         return;
     }
     let Some(report) = cached_classify.as_ref() else {
-        widgets::render_empty_state(ui, "正在分析...", "分类统计正在后台计算");
+        widgets::render_empty_state(ui, theme, "正在分析...", "分类统计正在后台计算");
         return;
     };
 

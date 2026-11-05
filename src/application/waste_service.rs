@@ -97,9 +97,7 @@ pub struct WasteService;
 
 impl WasteService {
     /// 扫描空间浪费（使用默认配置）
-    pub fn scan(root: &FileNode) -> WasteReport {
-        Self::scan_with_config(root, &WasteConfig::default())
-    }
+    pub fn scan(root: &FileNode) -> WasteReport { Self::scan_with_config(root, &WasteConfig::default()) }
 
     /// 扫描空间浪费（自定义配置）
     pub fn scan_with_config(root: &FileNode, config: &WasteConfig) -> WasteReport {
@@ -204,7 +202,7 @@ impl WasteService {
             .filter(|n| {
                 n.is_file()
                     && n.modified
-                        .map_or(false, |m| now.duration_since(m).unwrap_or(Duration::ZERO) > threshold)
+                        .is_some_and(|m| now.duration_since(m).unwrap_or(Duration::ZERO) > threshold)
             })
             .map(|n| {
                 let days = n
@@ -412,7 +410,7 @@ impl WasteService {
             .collect();
 
         // 按总大小降序排序
-        by_type.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+        by_type.sort_by_key(|a| std::cmp::Reverse(a.total_size));
 
         // 按类型优先级和大小排序 items
         items.sort_by(|a, b| {
@@ -437,9 +435,11 @@ impl WasteService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn detect_empty_directories() {

@@ -15,11 +15,11 @@ pub(crate) fn render_waste(
     cached_waste: &Option<WasteReport>,
 ) {
     if state.node.is_none() {
-        widgets::render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
+        widgets::render_empty_state(ui, theme, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
         return;
     }
     let Some(report) = cached_waste.as_ref() else {
-        widgets::render_empty_state(ui, "正在分析...", "浪费检测正在后台计算");
+        widgets::render_empty_state(ui, theme, "正在分析...", "浪费检测正在后台计算");
         return;
     };
 

@@ -13,10 +13,9 @@ use std::f32::consts::TAU;
 use eframe::egui::{self, Color32, Mesh, Pos2, Rect, Sense, Shape, Ui, Vec2};
 use eframe::epaint;
 
+use super::theme::ThemeColors;
 use crate::domain::file_node::FileNode;
 use crate::domain::value_objects::{ByteSize, FileCategory};
-
-use super::theme::ThemeColors;
 
 // ─── 常量 ──────────────────────────────────────────────────────────────────
 
@@ -198,7 +197,7 @@ fn collect_segments(
 
     // 按大小降序排序子节点
     let mut children: Vec<&FileNode> = node.children.iter().filter(|c| c.size.0 > 0).collect();
-    children.sort_by(|a, b| b.size.0.cmp(&a.size.0));
+    children.sort_by_key(|a| std::cmp::Reverse(a.size.0));
 
     // 如果所有子节点都很小且总大小不匹配，用 node.size
     let parent_total = total_size.max(1.0);
@@ -236,7 +235,7 @@ fn add_ring_segment(
     color: Color32,
 ) {
     let span = end_angle - start_angle;
-    let n = ((span * 60.0 / TAU).ceil() as u32).max(4).min(120);
+    let n = ((span * 60.0 / TAU).ceil() as u32).clamp(4, 120);
     let step = span / n as f32;
 
     let base = mesh.vertices.len() as u32;
@@ -328,7 +327,7 @@ fn draw_legend(painter: &mut egui::Painter, rect: Rect, theme: &ThemeColors) {
 // ─── 悬停命中检测 ─────────────────────────────────────────────────────────
 
 /// 在环段列表中查找鼠标位置对应的环段
-fn find_segment<'a>(segments: &'a [SegmentInfo], center: Pos2, pos: Pos2) -> Option<&'a SegmentInfo> {
+fn find_segment(segments: &[SegmentInfo], center: Pos2, pos: Pos2) -> Option<&SegmentInfo> {
     let rel = pos - center;
     let dist = rel.length();
     let angle = rel.y.atan2(rel.x);

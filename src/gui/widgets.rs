@@ -42,7 +42,7 @@ pub fn render_tab_button(
             painter.text(
                 badge_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                &n.to_string(),
+                n.to_string(),
                 egui::FontId::proportional(10.0),
                 theme.text_primary,
             );
@@ -124,12 +124,12 @@ pub fn painter_dot(ui: &mut egui::Ui, color: Color32) {
 }
 
 /// 在 ui 中绘制指定颜色的小圆点
-pub fn painter_dot_color(ui: &mut egui::Ui, color: Color32) {
-    painter_dot(ui, color);
-}
+pub fn painter_dot_color(ui: &mut egui::Ui, color: Color32) { painter_dot(ui, color); }
 
 /// 统一空状态（带绘制图标）
-pub fn render_empty_state(ui: &mut egui::Ui, title: &str, hint: &str) {
+///
+/// 颜色全部取自主题（`ThemeColors`），随明暗主题自动切换，不再硬编码灰阶。
+pub fn render_empty_state(ui: &mut egui::Ui, theme: &ThemeColors, title: &str, hint: &str) {
     let center_x = ui.min_rect().center().x;
 
     // 绘制简单图标：文件夹轮廓 + 搜索标识
@@ -141,8 +141,8 @@ pub fn render_empty_state(ui: &mut egui::Ui, title: &str, hint: &str) {
     );
     let painter = ui.painter();
 
-    // 文件夹主体（矩形 + 顶部折角）
-    let body_color = Color32::from_gray(90);
+    // 文件夹主体（矩形 + 顶部折角）——使用主题次级文字色，明暗主题下都清晰
+    let body_color = theme.text_dim;
     let body_rect = egui::Rect::from_min_size(
         egui::pos2(icon_rect.min.x + 4.0, icon_rect.min.y + 10.0),
         egui::Vec2::new(icon_size - 8.0, icon_size - 14.0),
@@ -156,8 +156,8 @@ pub fn render_empty_state(ui: &mut egui::Ui, title: &str, hint: &str) {
     );
     painter.rect_filled(tab_rect, 2.0, body_color);
 
-    // 问号标识在文件夹中间
-    let q_color = Color32::from_gray(160);
+    // 问号标识在文件夹中间——用面板底色做"挖空"对比
+    let q_color = theme.bg_surface;
     painter.text(
         body_rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -169,9 +169,9 @@ pub fn render_empty_state(ui: &mut egui::Ui, title: &str, hint: &str) {
     // 文字部分
     ui.add_space(icon_size + 60.0);
     ui.vertical_centered(|ui| {
-        ui.label(egui::RichText::new(title).color(Color32::from_gray(180)).strong());
+        ui.label(egui::RichText::new(title).color(theme.text_primary).strong());
         ui.add_space(6.0);
-        ui.label(egui::RichText::new(hint).color(Color32::from_gray(140)));
+        ui.label(egui::RichText::new(hint).color(theme.text_secondary));
     });
 }
 

@@ -1,32 +1,27 @@
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use eframe::egui;
 use egui::{Color32, Vec2};
-
-use crate::application::models::{SnapshotDiff, TrendReport};
-use crate::application::{
-    ClassifyReport, ClassifyService, DuplicateReport, DuplicateService, ReportService, ScanService, TopNEntry,
-    TrendService, WasteReport, WasteService,
-};
-use crate::domain::scan_engine::{CancelToken, ScanOptions, ScanProgress, ScanStats};
-use crate::domain::value_objects::ByteSize;
-use crate::domain::DragCollector;
-use crate::infrastructure::{detect_best_engine, HistoryStorage};
-
-#[cfg(not(target_os = "windows"))]
-use crate::infrastructure::FsScanEngine;
-#[cfg(target_os = "windows")]
-use crate::infrastructure::{FsScanEngine, MftScanEngine, UsnScanEngine};
 
 use super::fonts::setup_chinese_fonts;
 use super::render;
 use super::sunburst::SunburstView;
 use super::theme::{apply_theme, ThemeColors};
-use super::treemap::TreemapView;
+use super::treemap::{TreemapCache, TreemapView};
 use super::widgets::*;
+use crate::application::models::{SnapshotDiff, TrendReport};
+use crate::application::{ClassifyReport, DuplicateReport, TopNEntry, TrendService, WasteReport};
+use crate::domain::scan_engine::{CancelToken, ScanOptions, ScanProgress, ScanStats};
+use crate::domain::value_objects::ByteSize;
+use crate::domain::DragCollector;
+use crate::infrastructure::{HistoryStorage, VolumeReconciliation};
+
+// 扫描控制与聚合缓存拆为 app 的子模块：子模块可访问本模块的私有字段，
+// 其方法以 pub(super) 暴露给本模块调用。
+mod cache_ctl;
+mod scan_ctl;
 
 pub struct GuiOptions {
     pub initial_path: PathBuf,
@@ -43,6 +38,8 @@ struct ScanState {
     cancel: CancelToken,
     started_at: Option<SystemTime>,
     generation: u64,
+    /// 卷级对账（仅卷根扫描有值）：扫描完成时算一次并缓存，避免每帧枚举卷
+    reconciliation: Option<VolumeReconciliation>,
 }
 
 pub struct Snapshot {
@@ -52,6 +49,8 @@ pub struct Snapshot {
     pub running: bool,
     pub error: Option<String>,
     pub generation: u64,
+    /// 卷级对账（仅卷根扫描有值）
+    pub reconciliation: Option<VolumeReconciliation>,
 }
 
 #[derive(Default)]
@@ -60,15 +59,12 @@ struct ComputeCache {
     top_files: Option<Vec<TopNEntry>>,
     top_dirs: Option<Vec<TopNEntry>>,
     classify: Option<ClassifyReport>,
-    duplicates: Option<DuplicateReport>,
     waste: Option<WasteReport>,
     all_files: Option<Vec<TopNEntry>>,
 }
 
 impl ScanState {
-    fn shared() -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self::default()))
-    }
+    fn shared() -> Arc<Mutex<Self>> { Arc::new(Mutex::new(Self::default())) }
 }
 
 pub struct TreeSizeApp {
@@ -82,6 +78,8 @@ pub struct TreeSizeApp {
     search_case_sensitive: bool,
     search_match_full: bool,
     font_scale: f32,
+    /// 最近一次写入 egui Style 的缩放值；与 `font_scale` 不同即为脏，需重建样式
+    applied_font_scale: f32,
     dark_mode: bool,
     theme_follow_system: bool,
     show_settings: bool,
@@ -104,6 +102,9 @@ pub struct TreeSizeApp {
     delete_confirm_path: Option<std::path::PathBuf>,
     delete_error: Option<String>,
     prev_running: bool,
+    /// 帧调度专用上一帧状态，与 `prev_running`（扫描结束保存历史）解耦
+    repaint_prev_running: bool,
+    repaint_prev_computing: bool,
     history_storage: Option<HistoryStorage>,
     cached_trend: Option<TrendReport>,
     cached_diff: Option<SnapshotDiff>,
@@ -113,7 +114,14 @@ pub struct TreeSizeApp {
     cache_computing: bool,
     cache_generation_computing: u64,
     compute_cache: Arc<Mutex<ComputeCache>>,
-    last_repaint: Instant,
+    /// 重复文件哈希（需读盘，慢）独立后台线程状态，与快速聚合解耦，避免阻塞「最大文件/目录/主要类型」洞察
+    dup_computing: bool,
+    /// 当前重复文件计算对应的代次，用于丢弃代次变更后的过期结果
+    dup_generation: u64,
+    /// 重复文件结果交接缓冲（独立于 ComputeCache，避免两线程互相覆盖）
+    dup_cache: Arc<Mutex<Option<DuplicateReport>>>,
+    /// Treemap 布局缓存（按代次 + 视口尺寸失效），跨帧保留避免每帧重排
+    treemap_cache: TreemapCache,
 }
 
 #[derive(Clone)]
@@ -244,6 +252,7 @@ impl TreeSizeApp {
             search_case_sensitive: false,
             search_match_full: false,
             font_scale: 1.0,
+            applied_font_scale: 0.0, // 与 1.0 不同，保证首帧写入一次样式
             dark_mode,
             theme_follow_system,
             show_settings: false,
@@ -266,6 +275,8 @@ impl TreeSizeApp {
             delete_confirm_path: None,
             delete_error: None,
             prev_running: false,
+            repaint_prev_running: false,
+            repaint_prev_computing: false,
             history_storage: None,
             cached_trend: None,
             cached_diff: None,
@@ -275,151 +286,16 @@ impl TreeSizeApp {
             cache_computing: false,
             cache_generation_computing: 0,
             compute_cache: Arc::new(Mutex::new(ComputeCache::default())),
-            last_repaint: Instant::now(),
+            dup_computing: false,
+            dup_generation: 0,
+            dup_cache: Arc::new(Mutex::new(None)),
+            treemap_cache: TreemapCache::default(),
         }
-    }
-
-    fn start_scan(&mut self) {
-        let path_str = self.path_input.trim().to_string();
-        let path = PathBuf::from(&path_str);
-        tracing::info!(target: "treesize::gui", "start_scan 被调用，路径：{}", path.display());
-
-        if !path.exists() {
-            self.state.lock().unwrap().error = Some(format!("路径不存在：{}", path.display()));
-            tracing::warn!(target: "treesize::gui", "路径不存在：{}", path.display());
-            return;
-        }
-
-        if !self.path_history.contains(&path_str) {
-            self.path_history.push_back(path_str.clone());
-            if self.path_history.len() > 20 {
-                self.path_history.pop_front();
-            }
-        }
-
-        let state = self.state.clone();
-        let mut options = self.options.clone();
-        options.include_hidden = self.show_hidden;
-
-        let generation = {
-            let mut s = state.lock().unwrap();
-            s.cancel.cancel();
-            s.cancel = CancelToken::new();
-            s.running = true;
-            s.error = None;
-            s.node = None;
-            s.stats = None;
-            s.progress = ScanProgress::default();
-            s.started_at = Some(SystemTime::now());
-            s.generation += 1;
-            s.generation
-        };
-
-        let cancel_token = {
-            let s = state.lock().unwrap();
-            s.cancel.clone()
-        };
-
-        let path_clone = path.clone();
-        tracing::info!(target: "treesize::gui", "即将启动扫描线程，代次：{}", generation);
-
-        std::thread::Builder::new()
-            .name("treesize-scan".to_string())
-            .stack_size(256 * 1024 * 1024)
-            .spawn(move || {
-            tracing::info!(target: "treesize::gui", "扫描线程已启动，路径：{}", path_clone.display());
-
-            let mut current_options = options.clone();
-            let mut fallback_to_fs = false;
-
-            let result = loop {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    tracing::info!(target: "treesize::gui", "创建扫描引擎...");
-                    let engine = create_scan_engine(&current_options, &path_clone);
-                    tracing::info!(target: "treesize::gui", "创建扫描服务...");
-                    let service = ScanService::new(engine);
-
-                    let state_clone = state.clone();
-                    let progress_cb = move |p: &ScanProgress| {
-                        if let Ok(mut s) = state_clone.lock() {
-                            if s.generation != generation {
-                                return;
-                            }
-                            s.progress = p.clone();
-                        }
-                    };
-
-                    tracing::info!(target: "treesize::gui", "开始执行扫描...");
-                    service.scan(path.clone(), &current_options, Some(&progress_cb), Some(&cancel_token))
-                }));
-
-                match &result {
-                    Ok(Err(e)) => {
-                        let err_str = e.to_string();
-                        if !fallback_to_fs
-                            && current_options.engine == crate::domain::scan_engine::ScanEngineType::Mft
-                            && (err_str.contains("MFT") || err_str.contains("NTFS") || err_str.contains("LCN"))
-                        {
-                            tracing::warn!(target: "treesize::gui", "MFT 扫描失败，自动降级到 Fs 引擎重试");
-                            fallback_to_fs = true;
-                            current_options.engine = crate::domain::scan_engine::ScanEngineType::Fs;
-                            continue;
-                        }
-                    },
-                    _ => {},
-                }
-
-                break result;
-            };
-
-            tracing::info!(target: "treesize::gui", "扫描线程执行完毕");
-
-            let (result_node, result_stats, result_error) = match result {
-                Ok(Ok((node, stats))) => {
-                    tracing::info!(target: "treesize::gui", "GUI 扫描完成");
-                    (Some(node), Some(stats), None)
-                },
-                Ok(Err(e)) => {
-                    tracing::error!(target: "treesize::gui", "GUI 扫描失败：{e}");
-                    (None, None, Some(e.to_string()))
-                },
-                Err(panic_payload) => {
-                    let msg = panic_payload
-                        .downcast_ref::<&str>()
-                        .map(|s| s.to_string())
-                        .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "扫描线程内部错误".to_string());
-                    tracing::error!(target: "treesize::gui", "扫描线程 panic：{msg}");
-                    (None, None, Some(msg))
-                },
-            };
-
-            if let Ok(mut s) = state.lock() {
-                if s.generation != generation {
-                    tracing::info!(target: "treesize::gui", "跳过过期扫描结果（代次不匹配）");
-                    return;
-                }
-                s.running = false;
-                s.error = result_error;
-                if let (Some(n), Some(st)) = (result_node, result_stats) {
-                    s.node = Some(Arc::new(n));
-                    s.stats = Some(st);
-                }
-            }
-        })
-        .expect("创建扫描线程失败");
-    }
-
-    fn cancel_scan(&mut self) {
-        let s = self.state.lock().unwrap();
-        s.cancel.cancel();
     }
 
     fn tab_badge(&self, tab: Tab) -> Option<u64> {
         let s = self.state.lock().unwrap();
-        if s.node.is_none() {
-            return None;
-        }
+        s.node.as_ref()?;
         match tab {
             Tab::Tree | Tab::Treemap | Tab::Sunburst | Tab::Dashboard | Tab::Trend => None,
             Tab::TopFiles => Some(self.top_n as u64),
@@ -436,11 +312,34 @@ impl TreeSizeApp {
     }
 }
 
+/// 帧调度决策：由「扫描/计算是否进行中」及上一帧状态推导本帧是否请求重绘。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepaintDecision {
+    /// 无需主动请求，交给 egui 的交互驱动（空闲不空转）
+    Idle,
+    /// 立即重绘：刷新扫描进度，或收敛刚结束的最终状态
+    Now,
+    /// 低频轮询：等待后台聚合计算结果
+    Poll,
+}
+
+fn repaint_decision(running: bool, computing: bool, prev_running: bool, prev_computing: bool) -> RepaintDecision {
+    if running {
+        RepaintDecision::Now
+    } else if computing {
+        RepaintDecision::Poll
+    } else if prev_running || prev_computing {
+        // 上一帧还在忙、这一帧已空闲：补一帧把最终结果绘制出来
+        RepaintDecision::Now
+    } else {
+        RepaintDecision::Idle
+    }
+}
+
 impl eframe::App for TreeSizeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_font_scale(ctx);
         self.apply_theme_if_dirty(ctx);
-        self.control_frame_rate(ctx);
 
         let snapshot = self.get_snapshot();
         let scan_just_finished = !snapshot.running && self.prev_running;
@@ -476,11 +375,20 @@ impl eframe::App for TreeSizeApp {
                 Tab::Collect => self.render_collect(ui),
             }
         });
+
+        // 放在渲染之后：refresh_cache 可能在本帧刚启动后台计算，
+        // 帧调度需要看到本帧最新的 cache_computing 状态。
+        self.control_frame_rate(ctx);
     }
 }
 
 impl TreeSizeApp {
+    /// 仅当缩放比例变化时重建文本样式（font_scale dirty 守卫）。
+    /// 记录「已应用值」而非依赖控件显式置脏，可覆盖任何修改 font_scale 的路径。
     fn apply_font_scale(&mut self, ctx: &egui::Context) {
+        if self.applied_font_scale == self.font_scale {
+            return;
+        }
         let s = self.font_scale;
         ctx.style_mut(|style| {
             use egui::TextStyle::*;
@@ -495,6 +403,7 @@ impl TreeSizeApp {
             style.spacing.item_spacing = Vec2::new(8.0, 6.0);
             style.spacing.button_padding = Vec2::new(10.0, 4.0);
         });
+        self.applied_font_scale = s;
     }
 
     fn apply_theme_if_dirty(&mut self, ctx: &egui::Context) {
@@ -504,19 +413,30 @@ impl TreeSizeApp {
         }
     }
 
+    /// 帧调度：仅在确有工作要刷新时请求重绘，空闲时交给 egui 的交互驱动。
+    ///
+    /// - 扫描中：持续重绘刷新进度
+    /// - 后台聚合计算中：低频轮询等待结果
+    /// - 扫描/计算刚结束：补一帧把最终状态绘制出来
+    /// - 完全空闲：不主动请求，消除原先 30fps 的常驻空转
     fn control_frame_rate(&mut self, ctx: &egui::Context) {
         let running = self.state.try_lock().map(|s| s.running).unwrap_or(false);
-        let now = Instant::now();
-        let min_frame_interval = Duration::from_secs_f32(1.0 / 30.0);
-        if running {
-            ctx.request_repaint();
-        } else if self.prev_running {
-            ctx.request_repaint();
-            self.prev_running = false;
-        } else if now.duration_since(self.last_repaint) >= min_frame_interval {
-            ctx.request_repaint_after(min_frame_interval);
+        // 快速聚合或重复文件哈希任一进行中都需要低频轮询；两者都收敛后回归空闲
+        let computing = self.cache_computing || self.dup_computing;
+        let decision = repaint_decision(
+            running,
+            computing,
+            self.repaint_prev_running,
+            self.repaint_prev_computing,
+        );
+        match decision {
+            RepaintDecision::Idle => {},
+            RepaintDecision::Now => ctx.request_repaint(),
+            RepaintDecision::Poll => ctx.request_repaint_after(Duration::from_millis(50)),
         }
-        self.last_repaint = now;
+
+        self.repaint_prev_running = running;
+        self.repaint_prev_computing = computing;
     }
 
     fn get_snapshot(&self) -> Snapshot {
@@ -528,6 +448,7 @@ impl TreeSizeApp {
             running: s.running,
             error: s.error.clone(),
             generation: s.generation,
+            reconciliation: s.reconciliation.clone(),
         }
     }
 
@@ -952,139 +873,6 @@ impl TreeSizeApp {
             });
     }
 
-    fn invalidate_cache_if_needed(&mut self, snapshot: &Snapshot) {
-        let cache_invalid = snapshot.generation != self.cache_generation || self.cache_top_n != self.top_n;
-        if cache_invalid {
-            self.cache_generation = snapshot.generation;
-            self.cache_top_n = self.top_n;
-            self.cached_top_files = None;
-            self.cached_top_dirs = None;
-            self.cached_classify = None;
-            self.cached_duplicates = None;
-            self.cached_waste = None;
-            self.cached_all_files = None;
-            *self.compute_cache.lock().unwrap() = ComputeCache::default();
-        }
-    }
-
-    fn refresh_cache(&mut self, snapshot: &Snapshot) {
-        // 扫描运行期间不启动缓存计算：
-        // 1) 计算基于旧树，扫描完成后代次变化即作废，纯浪费 CPU/磁盘；
-        // 2) 重复文件服务的哈希与扫描争抢全局 rayon 线程池与磁盘，
-        //    曾把 MFT 解析从 0.4s 拖慢到 25.6s。
-        if snapshot.node.is_none() || snapshot.running {
-            return;
-        }
-
-        let needs_compute = (self.selected_tab == Tab::Dashboard
-            && (self.cached_top_files.is_none()
-                || self.cached_top_dirs.is_none()
-                || self.cached_classify.is_none()
-                || self.cached_duplicates.is_none()))
-            || (self.selected_tab == Tab::TopFiles && self.cached_all_files.is_none())
-            || (self.selected_tab == Tab::Classify && self.cached_classify.is_none())
-            || (self.selected_tab == Tab::Duplicates && self.cached_duplicates.is_none())
-            || (self.selected_tab == Tab::Waste && self.cached_waste.is_none());
-
-        if needs_compute && !self.cache_computing {
-            self.cache_computing = true;
-            self.cache_generation_computing = snapshot.generation;
-
-            let state_clone = self.state.clone();
-            let compute_cache = self.compute_cache.clone();
-            let selected_tab = self.selected_tab;
-            let top_n = self.top_n;
-            let generation = snapshot.generation;
-
-            std::thread::spawn(move || {
-                let s = state_clone.lock().unwrap();
-                if let Some(node) = s.node.as_ref() {
-                    if s.generation != generation {
-                        return;
-                    }
-
-                    let node_clone = node.clone();
-                    drop(s); // ⚡ 尽早释放 state 锁
-
-                    // ⚡ 先计算，不持有任何锁
-                    let (top_files, top_dirs, classify, duplicates, waste, all_files) = match selected_tab {
-                        Tab::Dashboard => {
-                            let tf = ReportService::top_n_files_report(&node_clone, top_n);
-                            let td = ReportService::top_n_dirs_report(&node_clone, top_n);
-                            let cl = ClassifyService::analyze(&node_clone);
-                            let dd = DuplicateService::scan(&node_clone, 1024);
-                            (Some(tf), Some(td), Some(cl), Some(dd), None, None)
-                        },
-                        Tab::TopFiles => {
-                            let af = ReportService::top_n_files_report(&node_clone, top_n.max(200));
-                            (None, None, None, None, None, Some(af))
-                        },
-                        Tab::Classify => {
-                            let cl = ClassifyService::analyze(&node_clone);
-                            (None, None, Some(cl), None, None, None)
-                        },
-                        Tab::Duplicates => {
-                            let dd = DuplicateService::scan(&node_clone, 1024);
-                            (None, None, None, Some(dd), None, None)
-                        },
-                        Tab::Waste => {
-                            let wa = WasteService::scan(&node_clone);
-                            (None, None, None, None, Some(wa), None)
-                        },
-                        _ => (None, None, None, None, None, None),
-                    };
-
-                    // ⚡ 计算完毕，短时间获取锁写入结果
-                    let mut cache = compute_cache.lock().unwrap();
-                    cache.generation = generation;
-                    if let Some(v) = top_files {
-                        cache.top_files = Some(v);
-                    }
-                    if let Some(v) = top_dirs {
-                        cache.top_dirs = Some(v);
-                    }
-                    if let Some(v) = classify {
-                        cache.classify = Some(v);
-                    }
-                    if let Some(v) = duplicates {
-                        cache.duplicates = Some(v);
-                    }
-                    if let Some(v) = waste {
-                        cache.waste = Some(v);
-                    }
-                    if let Some(v) = all_files {
-                        cache.all_files = Some(v);
-                    }
-                }
-            });
-        }
-
-        if self.cache_computing {
-            let mut cache = self.compute_cache.lock().unwrap();
-            if cache.generation == snapshot.generation {
-                if let Some(tf) = cache.top_files.take() {
-                    self.cached_top_files = Some(tf);
-                }
-                if let Some(td) = cache.top_dirs.take() {
-                    self.cached_top_dirs = Some(td);
-                }
-                if let Some(cl) = cache.classify.take() {
-                    self.cached_classify = Some(cl);
-                }
-                if let Some(dd) = cache.duplicates.take() {
-                    self.cached_duplicates = Some(dd);
-                }
-                if let Some(wa) = cache.waste.take() {
-                    self.cached_waste = Some(wa);
-                }
-                if let Some(af) = cache.all_files.take() {
-                    self.cached_all_files = Some(af);
-                }
-                self.cache_computing = false;
-            }
-        }
-    }
-
     fn render_dashboard(&mut self, ui: &mut egui::Ui, state: &Snapshot) {
         render::dashboard::render_dashboard(
             ui,
@@ -1100,7 +888,7 @@ impl TreeSizeApp {
 
     fn render_tree(&mut self, ui: &mut egui::Ui, state: &Snapshot) {
         if state.node.is_none() {
-            render_empty_state(ui, "尚未扫描", "在上方输入路径，或选择目录后开始");
+            render_empty_state(ui, &self.theme, "尚未扫描", "在上方输入路径，或选择目录后开始");
             return;
         }
         let node = state.node.as_ref().unwrap();
@@ -1119,18 +907,18 @@ impl TreeSizeApp {
         );
     }
 
-    fn render_treemap(&self, ui: &mut egui::Ui, state: &Snapshot) {
+    fn render_treemap(&mut self, ui: &mut egui::Ui, state: &Snapshot) {
         if state.node.is_none() {
-            render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
+            render_empty_state(ui, &self.theme, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
             return;
         }
         let node = state.node.as_ref().unwrap();
-        TreemapView::show(ui, node, &self.theme);
+        TreemapView::show(ui, node, &self.theme, &mut self.treemap_cache, state.generation);
     }
 
     fn render_sunburst(&self, ui: &mut egui::Ui, state: &Snapshot) {
         if state.node.is_none() {
-            render_empty_state(ui, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
+            render_empty_state(ui, &self.theme, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
             return;
         }
         let node = state.node.as_ref().unwrap();
@@ -1158,6 +946,7 @@ impl TreeSizeApp {
             None => {
                 render_empty_state(
                     ui,
+                    &self.theme,
                     "暂无扫描历史",
                     "执行扫描后自动保存历史记录，或使用 CLI 的 --history-save 参数",
                 );
@@ -1224,8 +1013,8 @@ impl TreeSizeApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if !self.drag_collector.items.is_empty() {
                         let marked = self.drag_collector.marked_count();
-                        if marked > 0 {
-                            if ui
+                        if marked > 0
+                            && ui
                                 .add(
                                     egui::Button::new(
                                         egui::RichText::new(format!("删除已标记（{}）", marked)).color(Color32::WHITE),
@@ -1233,9 +1022,8 @@ impl TreeSizeApp {
                                     .fill(self.theme.danger),
                                 )
                                 .clicked()
-                            {
-                                self.delete_marked_collected();
-                            }
+                        {
+                            self.delete_marked_collected();
                         }
                         if ui.button("清空全部").clicked() {
                             self.drag_collector.clear();
@@ -1250,6 +1038,7 @@ impl TreeSizeApp {
                 ui.add_space(20.0);
                 render_empty_state(
                     ui,
+                    &self.theme,
                     "暂无收集文件",
                     "点击上方「添加目录」或「添加文件」按钮选择要管理的项目",
                 );
@@ -1395,44 +1184,6 @@ impl TreeSizeApp {
     }
 }
 
-fn create_scan_engine(
-    options: &ScanOptions,
-    root_path: &std::path::Path,
-) -> Arc<dyn crate::domain::scan_engine::ScanEngine> {
-    // 解析 Auto 引擎类型
-    let engine_type = if options.engine == crate::domain::scan_engine::ScanEngineType::Auto {
-        let detected = detect_best_engine(root_path);
-        tracing::info!(target: "treesize::gui", "引擎自动选择结果：{}", detected);
-        detected
-    } else {
-        options.engine
-    };
-
-    #[cfg(target_os = "windows")]
-    {
-        match engine_type {
-            crate::domain::scan_engine::ScanEngineType::Mft => {
-                tracing::info!("GUI 使用 MFT 直接读取引擎（极速）");
-                Arc::new(MftScanEngine::new())
-            },
-            crate::domain::scan_engine::ScanEngineType::Usn => {
-                tracing::info!("GUI 使用 USN Journal 增量引擎");
-                Arc::new(UsnScanEngine::new())
-            },
-            _ => {
-                tracing::info!("GUI 使用 FsScanEngine（文件系统遍历）");
-                Arc::new(FsScanEngine::new())
-            },
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = engine_type; // 非 Windows 始终用 Fs
-        tracing::info!("GUI 使用 FsScanEngine（文件系统遍历）");
-        Arc::new(FsScanEngine::new())
-    }
-}
-
 fn delete_path(path: &std::path::Path) -> Result<(), String> {
     if path.is_dir() {
         std::fs::remove_dir_all(path).map_err(|e| format!("删除目录失败：{}", e))
@@ -1440,124 +1191,6 @@ fn delete_path(path: &std::path::Path) -> Result<(), String> {
         std::fs::remove_file(path).map_err(|e| format!("删除文件失败：{}", e))
     } else {
         Err("路径不存在".to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::FileNode;
-    use std::sync::Arc;
-
-    #[test]
-    fn scan_state_default_initial_state() {
-        let state = ScanState::default();
-        assert!(state.node.is_none());
-        assert!(state.stats.is_none());
-        assert!(!state.running);
-        assert!(state.error.is_none());
-        assert_eq!(state.generation, 0);
-    }
-
-    #[test]
-    fn scan_state_shared_creates_mutex() {
-        let shared = ScanState::shared();
-        let locked = shared.lock().unwrap();
-        assert_eq!(locked.generation, 0);
-    }
-
-    #[test]
-    fn scan_state_generation_increments() {
-        let state = Arc::new(Mutex::new(ScanState::default()));
-        {
-            let mut s = state.lock().unwrap();
-            s.generation = 5;
-            s.running = true;
-            s.node = Some(Arc::new(FileNode::new_dir(PathBuf::from("/test"), None)));
-        }
-        let snapshot = {
-            let s = state.lock().unwrap();
-            Snapshot {
-                node: s.node.clone(),
-                stats: s.stats.clone(),
-                progress: s.progress.clone(),
-                running: s.running,
-                error: s.error.clone(),
-                generation: s.generation,
-            }
-        };
-        assert_eq!(snapshot.generation, 5);
-        assert!(snapshot.running);
-        assert!(snapshot.node.is_some());
-        assert!(snapshot.stats.is_none());
-        assert!(snapshot.error.is_none());
-    }
-
-    #[test]
-    fn snapshot_transition_to_error() {
-        let state = Arc::new(Mutex::new(ScanState::default()));
-        {
-            let mut s = state.lock().unwrap();
-            s.running = false;
-            s.error = Some("测试错误".to_string());
-            s.generation = 2;
-        }
-        let snapshot = {
-            let s = state.lock().unwrap();
-            Snapshot {
-                node: s.node.clone(),
-                stats: s.stats.clone(),
-                progress: s.progress.clone(),
-                running: s.running,
-                error: s.error.clone(),
-                generation: s.generation,
-            }
-        };
-        assert!(!snapshot.running);
-        assert_eq!(snapshot.error, Some("测试错误".to_string()));
-        assert_eq!(snapshot.generation, 2);
-    }
-
-    #[test]
-    fn dir_size_recursive_depth_limit() {
-        // 创建一个深层嵌套的临时目录结构
-        let dir = std::env::temp_dir().join("treesize_test_depth");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // /depth_test/sub1/sub2/sub3/file.txt
-        let sub1 = dir.join("sub1");
-        std::fs::create_dir_all(&sub1).unwrap();
-        let sub2 = sub1.join("sub2");
-        std::fs::create_dir_all(&sub2).unwrap();
-        let sub3 = sub2.join("sub3");
-        std::fs::create_dir_all(&sub3).unwrap();
-        std::fs::write(sub3.join("file.txt"), b"hello").unwrap();
-
-        // max_depth = 0: 只扫描根，不考虑子目录
-        let size_depth0 = dir_size_recursive(&dir, 0);
-        assert_eq!(size_depth0, 0, "depth 0 不应扫描子目录");
-
-        // max_depth = 3: 应能扫到 file.txt
-        let size_depth3 = dir_size_recursive(&dir, 3);
-        assert_eq!(size_depth3, 5, "depth 3 应能扫到 file.txt");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn tab_badge_mapping() {
-        // 验证各个 Tab 的 badge 返回值类型（不依赖实际数据）
-        let tabs_with_badge = [
-            super::Tab::TopFiles,
-            super::Tab::Classify,
-            super::Tab::Duplicates,
-            super::Tab::Waste,
-            super::Tab::Collect,
-        ];
-        assert_eq!(tabs_with_badge.len(), 5);
-        let tabs_without_badge = [Tab::Dashboard, Tab::Tree, Tab::Treemap, Tab::Sunburst, Tab::Trend];
-        assert_eq!(tabs_without_badge.len(), 5);
     }
 }
 
@@ -1610,4 +1243,191 @@ fn dir_size_recursive(path: &Path, max_depth: usize) -> u64 {
         }
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::cache_ctl::compute_cache_plan;
+    use super::*;
+    use crate::domain::FileNode;
+
+    #[test]
+    fn scan_state_default_initial_state() {
+        let state = ScanState::default();
+        assert!(state.node.is_none());
+        assert!(state.stats.is_none());
+        assert!(!state.running);
+        assert!(state.error.is_none());
+        assert_eq!(state.generation, 0);
+    }
+
+    #[test]
+    fn scan_state_shared_creates_mutex() {
+        let shared = ScanState::shared();
+        let locked = shared.lock().unwrap();
+        assert_eq!(locked.generation, 0);
+    }
+
+    #[test]
+    fn scan_state_generation_increments() {
+        let state = Arc::new(Mutex::new(ScanState::default()));
+        {
+            let mut s = state.lock().unwrap();
+            s.generation = 5;
+            s.running = true;
+            s.node = Some(Arc::new(FileNode::new_dir(PathBuf::from("/test"), None)));
+        }
+        let snapshot = {
+            let s = state.lock().unwrap();
+            Snapshot {
+                node: s.node.clone(),
+                stats: s.stats.clone(),
+                progress: s.progress.clone(),
+                running: s.running,
+                error: s.error.clone(),
+                generation: s.generation,
+                reconciliation: None,
+            }
+        };
+        assert_eq!(snapshot.generation, 5);
+        assert!(snapshot.running);
+        assert!(snapshot.node.is_some());
+        assert!(snapshot.stats.is_none());
+        assert!(snapshot.error.is_none());
+    }
+
+    #[test]
+    fn snapshot_transition_to_error() {
+        let state = Arc::new(Mutex::new(ScanState::default()));
+        {
+            let mut s = state.lock().unwrap();
+            s.running = false;
+            s.error = Some("测试错误".to_string());
+            s.generation = 2;
+        }
+        let snapshot = {
+            let s = state.lock().unwrap();
+            Snapshot {
+                node: s.node.clone(),
+                stats: s.stats.clone(),
+                progress: s.progress.clone(),
+                running: s.running,
+                error: s.error.clone(),
+                generation: s.generation,
+                reconciliation: None,
+            }
+        };
+        assert!(!snapshot.running);
+        assert_eq!(snapshot.error, Some("测试错误".to_string()));
+        assert_eq!(snapshot.generation, 2);
+    }
+
+    #[test]
+    fn dir_size_recursive_depth_limit() {
+        // 创建一个深层嵌套的临时目录结构
+        let dir = std::env::temp_dir().join("treesize_test_depth");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // /depth_test/sub1/sub2/sub3/file.txt
+        let sub1 = dir.join("sub1");
+        std::fs::create_dir_all(&sub1).unwrap();
+        let sub2 = sub1.join("sub2");
+        std::fs::create_dir_all(&sub2).unwrap();
+        let sub3 = sub2.join("sub3");
+        std::fs::create_dir_all(&sub3).unwrap();
+        std::fs::write(sub3.join("file.txt"), b"hello").unwrap();
+
+        // max_depth = 0: 只扫描根，不考虑子目录
+        let size_depth0 = dir_size_recursive(&dir, 0);
+        assert_eq!(size_depth0, 0, "depth 0 不应扫描子目录");
+
+        // max_depth = 3: 应能扫到 file.txt
+        let size_depth3 = dir_size_recursive(&dir, 3);
+        assert_eq!(size_depth3, 5, "depth 3 应能扫到 file.txt");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tab_badge_mapping() {
+        // 验证各个 Tab 的 badge 返回值类型（不依赖实际数据）
+        let tabs_with_badge = [
+            super::Tab::TopFiles,
+            super::Tab::Classify,
+            super::Tab::Duplicates,
+            super::Tab::Waste,
+            super::Tab::Collect,
+        ];
+        assert_eq!(tabs_with_badge.len(), 5);
+        let tabs_without_badge = [Tab::Dashboard, Tab::Tree, Tab::Treemap, Tab::Sunburst, Tab::Trend];
+        assert_eq!(tabs_without_badge.len(), 5);
+    }
+
+    #[test]
+    fn repaint_stays_idle_when_nothing_is_running() {
+        assert_eq!(repaint_decision(false, false, false, false), RepaintDecision::Idle);
+    }
+
+    #[test]
+    fn repaint_requests_every_frame_while_scanning() {
+        assert_eq!(repaint_decision(true, false, false, false), RepaintDecision::Now);
+        assert_eq!(repaint_decision(true, true, true, false), RepaintDecision::Now);
+    }
+
+    #[test]
+    fn repaint_polls_while_background_compute_is_running() {
+        assert_eq!(repaint_decision(false, true, false, true), RepaintDecision::Poll);
+        // 扫描中优先于计算，保持进度实时刷新
+        assert_eq!(repaint_decision(true, true, true, true), RepaintDecision::Now);
+    }
+
+    #[test]
+    fn repaint_converges_once_then_goes_idle() {
+        assert_eq!(repaint_decision(false, false, true, false), RepaintDecision::Now);
+        assert_eq!(repaint_decision(false, false, false, true), RepaintDecision::Now);
+        // 收敛帧之后不再持续请求，否则就是原来的 30fps 空转
+        assert_eq!(repaint_decision(false, false, false, false), RepaintDecision::Idle);
+    }
+
+    #[test]
+    fn dashboard_fast_plan_ignores_duplicates() {
+        // Dashboard 的快速聚合计划完全不关心 duplicates：
+        // 无论重复文件是否已算，都不应触发 dup 计算（重复文件现仅由「重复文件」页触发）。
+        let (needs_fast, needs_dup) = compute_cache_plan(
+            Tab::Dashboard,
+            false, // cached_top_files
+            false, // cached_top_dirs
+            false, // cached_classify
+            true,  // cached_all_files
+            false, // cached_duplicates（未就绪）
+            true,  // cached_waste
+        );
+        assert!(
+            needs_fast,
+            "Dashboard 快速聚合应在 top_files/top_dirs/classify 未就绪时触发"
+        );
+        assert!(!needs_dup, "Dashboard 不应触发 dup 计算（仅重复文件页触发）");
+
+        // 关键不变量：当 top_files/top_dirs/classify 已就绪、仅 duplicates 未就绪时，
+        // 快速聚合不应再被触发（避免重复计算被 duplicates 拖累），dup 也仍不应触发。
+        let (needs_fast2, needs_dup2) = compute_cache_plan(Tab::Dashboard, true, true, true, true, false, true);
+        assert!(!needs_fast2, "快速聚合已就绪后不应重复触发");
+        assert!(!needs_dup2, "Dashboard 永不触发 dup（直到访问重复文件页）");
+
+        // 即使 duplicates 已就绪，Dashboard 也不应触发 dup
+        let (needs_fast3, needs_dup3) = compute_cache_plan(Tab::Dashboard, true, true, true, true, true, true);
+        assert!(!needs_fast3 && !needs_dup3, "Dashboard 在任意缓存状态下都不应触发 dup");
+
+        // 重复文件页：仅触发 dup，不触发快速聚合
+        let (nf, nd) = compute_cache_plan(Tab::Duplicates, true, true, true, true, false, true);
+        assert!(!nf, "重复文件页不应触发快速聚合");
+        assert!(nd, "重复文件页应触发 dup 计算");
+
+        // 重复文件页 dup 就绪后不再触发
+        let (nf2, nd2) = compute_cache_plan(Tab::Duplicates, true, true, true, true, true, true);
+        assert!(!nf2 && !nd2, "重复文件页 dup 就绪后不应再触发");
+    }
 }
