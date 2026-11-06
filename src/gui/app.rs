@@ -7,7 +7,6 @@ use egui::{Color32, Vec2};
 
 use super::fonts::setup_chinese_fonts;
 use super::render;
-use super::sunburst::SunburstView;
 use super::theme::{apply_theme, ThemeColors};
 use super::treemap::{TreemapCache, TreemapView};
 use super::widgets::*;
@@ -192,7 +191,6 @@ enum Tab {
     Dashboard,
     Tree,
     Treemap,
-    Sunburst,
     TopFiles,
     Classify,
     Duplicates,
@@ -207,7 +205,6 @@ impl Tab {
             Tab::Dashboard => "概览",
             Tab::Tree => "树形",
             Tab::Treemap => "Treemap",
-            Tab::Sunburst => "环形图",
             Tab::TopFiles => "大文件",
             Tab::Classify => "分类",
             Tab::Duplicates => "重复",
@@ -220,7 +217,7 @@ impl Tab {
     /// 导航分组索引（用于视觉分区）
     fn group(self) -> usize {
         match self {
-            Tab::Dashboard | Tab::Tree | Tab::Treemap | Tab::Sunburst => 0,
+            Tab::Dashboard | Tab::Tree | Tab::Treemap => 0,
             Tab::TopFiles | Tab::Classify | Tab::Trend => 1,
             Tab::Duplicates | Tab::Waste | Tab::Collect => 2,
         }
@@ -297,7 +294,7 @@ impl TreeSizeApp {
         let s = self.state.lock().unwrap();
         s.node.as_ref()?;
         match tab {
-            Tab::Tree | Tab::Treemap | Tab::Sunburst | Tab::Dashboard | Tab::Trend => None,
+            Tab::Tree | Tab::Treemap | Tab::Dashboard | Tab::Trend => None,
             Tab::TopFiles => Some(self.top_n as u64),
             Tab::Classify => Some(
                 self.cached_classify
@@ -366,7 +363,6 @@ impl eframe::App for TreeSizeApp {
                 Tab::Dashboard => self.render_dashboard(ui, &snapshot),
                 Tab::Tree => self.render_tree(ui, &snapshot),
                 Tab::Treemap => self.render_treemap(ui, &snapshot),
-                Tab::Sunburst => self.render_sunburst(ui, &snapshot),
                 Tab::TopFiles => self.render_topn(ui, &snapshot),
                 Tab::Classify => self.render_classify(ui, &snapshot),
                 Tab::Duplicates => self.render_duplicates(ui, &snapshot),
@@ -843,7 +839,7 @@ impl TreeSizeApp {
                 ui.horizontal(|ui| {
                     use Tab::*;
                     let tabs = [
-                        Dashboard, Tree, Treemap, Sunburst, TopFiles, Classify, Duplicates, Waste, Trend, Collect,
+                        Dashboard, Tree, Treemap, TopFiles, Classify, Duplicates, Waste, Trend, Collect,
                     ];
                     let mut prev_group: Option<usize> = None;
                     for tab in tabs {
@@ -914,15 +910,6 @@ impl TreeSizeApp {
         }
         let node = state.node.as_ref().unwrap();
         TreemapView::show(ui, node, &self.theme, &mut self.treemap_cache, state.generation);
-    }
-
-    fn render_sunburst(&self, ui: &mut egui::Ui, state: &Snapshot) {
-        if state.node.is_none() {
-            render_empty_state(ui, &self.theme, "尚未扫描", "在上方输入路径，或点击「选择」目录后开始");
-            return;
-        }
-        let node = state.node.as_ref().unwrap();
-        SunburstView::show(ui, node, &self.theme);
     }
 
     fn render_trend(&mut self, ui: &mut egui::Ui, state: &Snapshot) {
@@ -1362,8 +1349,8 @@ mod tests {
             super::Tab::Collect,
         ];
         assert_eq!(tabs_with_badge.len(), 5);
-        let tabs_without_badge = [Tab::Dashboard, Tab::Tree, Tab::Treemap, Tab::Sunburst, Tab::Trend];
-        assert_eq!(tabs_without_badge.len(), 5);
+        let tabs_without_badge = [Tab::Dashboard, Tab::Tree, Tab::Treemap, Tab::Trend];
+        assert_eq!(tabs_without_badge.len(), 4);
     }
 
     #[test]

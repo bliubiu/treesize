@@ -49,6 +49,9 @@
 - `is_ntfs_volume` 改用 `GetVolumeInformationW` 判定文件系统名
   - 读引导扇区需要管理员权限，不能用于「是不是 NTFS」的探测
 - `ScanOptions` 新增 `apparent_size` 字段，默认 `false`（占用空间）
+- **移除「环形图」（Sunburst）视图**
+  - 删除 `gui/sunburst.rs` 及 `Tab::Sunburst` 全部枚举、渲染与徽标分支
+  - GUI 顶部导航不再显示「环形图」Tab，Treemap 视图保留
 - MSRV 提升至 Rust 1.80
 
 ### 修复

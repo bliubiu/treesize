@@ -5,7 +5,6 @@
 pub mod app;
 pub mod fonts;
 pub mod render;
-pub mod sunburst;
 pub mod theme;
 pub mod treemap;
 pub mod widgets;
