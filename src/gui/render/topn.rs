@@ -255,16 +255,7 @@ pub(crate) fn render_topn(
                     );
 
                     // 路径（截断）
-                    let path_short = if entry.path.len() > 80 {
-                        // 按 UTF-8 字符边界安全截取末尾部分，避免切在多字节字符中间导致 panic
-                        let mut start = entry.path.len() - 77;
-                        while !entry.path.is_char_boundary(start) {
-                            start += 1;
-                        }
-                        format!("…{}", &entry.path[start..])
-                    } else {
-                        entry.path.clone()
-                    };
+                    let path_short = shorten_path_tail(&entry.path, 80);
                     ui.add_sized(
                         [ui.available_width().max(50.0), 20.0],
                         egui::Label::new(egui::RichText::new(&path_short).color(theme.text_secondary)),
@@ -291,6 +282,21 @@ pub(crate) fn render_topn(
     sort_click
 }
 
+/// 截取路径末尾用于展示：超过 `max_bytes` 字节时保留尾部并前置省略号。
+///
+/// 起点向后对齐到最近的 UTF-8 字符边界，避免切在多字节字符（如中文）中间导致 panic。
+fn shorten_path_tail(path: &str, max_bytes: usize) -> String {
+    if path.len() <= max_bytes {
+        return path.to_string();
+    }
+    let keep = max_bytes.saturating_sub(3);
+    let mut start = path.len() - keep;
+    while !path.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &path[start..])
+}
+
 /// 返回排序列的排序箭头（▲/▼），非排序列返回空
 fn file_sort_arrow(sort_by: &TopFilesSortBy, base: TopFilesSortBy) -> &'static str {
     if sort_by.column() != base.column() {
@@ -310,5 +316,44 @@ pub(crate) fn toggle_file_sort(sort_by: &mut TopFilesSortBy, base: TopFilesSortB
         *sort_by = sort_by.toggle();
     } else {
         *sort_by = base;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shorten_path_tail;
+
+    #[test]
+    fn short_path_kept_as_is() {
+        let p = "C:/a/b.txt";
+        assert_eq!(shorten_path_tail(p, 80), p);
+    }
+
+    #[test]
+    fn long_ascii_path_keeps_tail() {
+        let p = format!("C:/{}", "a".repeat(120));
+        let out = shorten_path_tail(&p, 80);
+        assert!(out.starts_with('…'));
+        assert!(out.ends_with(&"a".repeat(77)));
+        assert_eq!(out, format!("…{}", &p[p.len() - 77..]));
+    }
+
+    #[test]
+    fn long_chinese_path_does_not_panic() {
+        // 复现原始崩溃：切点落在「快」的字节区间内部
+        let p = format!("C:/目录/{}快{}", "测".repeat(30), "试".repeat(40));
+        let out = shorten_path_tail(&p, 80);
+        assert!(out.starts_with('…'));
+        assert!(p.ends_with(out.trim_start_matches('…')));
+    }
+
+    #[test]
+    fn boundary_is_char_aligned() {
+        for extra in 0..6usize {
+            let p = format!("{}{}", "中".repeat(40), "a".repeat(extra));
+            let out = shorten_path_tail(&p, 80);
+            let tail = out.trim_start_matches('…');
+            assert!(p.ends_with(tail));
+        }
     }
 }
