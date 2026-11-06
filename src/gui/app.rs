@@ -21,6 +21,8 @@ use crate::infrastructure::{HistoryStorage, VolumeReconciliation};
 // 其方法以 pub(super) 暴露给本模块调用。
 mod cache_ctl;
 mod scan_ctl;
+#[cfg(target_os = "windows")]
+mod watch_ctl;
 
 pub struct GuiOptions {
     pub initial_path: PathBuf,
@@ -121,6 +123,9 @@ pub struct TreeSizeApp {
     dup_cache: Arc<Mutex<Option<DuplicateReport>>>,
     /// Treemap 布局缓存（按代次 + 视口尺寸失效），跨帧保留避免每帧重排
     treemap_cache: TreemapCache,
+    /// 磁盘内容变化监视器（USN Journal 轮询，仅 Windows NTFS）
+    #[cfg(target_os = "windows")]
+    watch: Option<Arc<watch_ctl::ChangeWatch>>,
 }
 
 #[derive(Clone)]
@@ -238,6 +243,10 @@ impl TreeSizeApp {
         let theme = apply_theme(&cc.egui_ctx, dark_mode);
 
         let path_input = options.initial_path.display().to_string();
+
+        #[cfg(target_os = "windows")]
+        let watch = Some(Arc::new(watch_ctl::ChangeWatch::new(cc.egui_ctx.clone())));
+
         Self {
             path_input,
             options: options.scan_options,
@@ -287,6 +296,8 @@ impl TreeSizeApp {
             dup_generation: 0,
             dup_cache: Arc::new(Mutex::new(None)),
             treemap_cache: TreemapCache::default(),
+            #[cfg(target_os = "windows")]
+            watch,
         }
     }
 
@@ -353,6 +364,8 @@ impl eframe::App for TreeSizeApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.render_tab_bar(ui);
+            #[cfg(target_os = "windows")]
+            self.render_change_hint(ui);
             ui.separator();
 
             let snapshot = self.get_snapshot();

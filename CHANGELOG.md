@@ -21,6 +21,15 @@
   - `EntryKind` / `RawEntry` 统一 Windows 快速路径与 `std::fs::read_dir` 回落路径
   - `allocated_size_of()` 供单文件扫描使用，走 `FileStandardInfo.AllocationSize`
 - `--apparent-size` 命令行参数：默认统计**占用空间**，显式指定时统计**逻辑长度**
+- **GUI 磁盘内容变化自动感知（USN Journal 轮询）** `gui/app/watch_ctl.rs`
+  - 扫描成功后记录当前根所在卷的 `(Journal ID, NextUsn)` 作为基线；后台线程每 3 秒
+    查询一次 USN，`NextUsn` 增长或 Journal 重置即判定磁盘内容发生变化
+  - 检测到变化时通过 `egui::Context::request_repaint` 唤醒空闲 UI，顶部显示
+    「检测到磁盘内容变化，当前数据可能已过期」提示条，由用户点击「重新扫描」手动刷新
+  - 读取卷设备需要权限：普通用户打开 `\\.\X:` 失败时不建立基线，自动感知自动关闭，
+    不影响正常扫描
+  - 选择 USN 而非 `ReadDirectoryChangesW` 递归监听：一次查询覆盖整卷、内核维护、
+    不会耗尽句柄或丢事件；新增 4 个单元测试覆盖 USN 变化判定
 - 扫描引擎对比分析文档 `docs/06-扫描引擎对比分析.md`
 
 ### 变更

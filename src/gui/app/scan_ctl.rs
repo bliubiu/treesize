@@ -59,6 +59,8 @@ impl TreeSizeApp {
         };
 
         let path_clone = path.clone();
+        #[cfg(target_os = "windows")]
+        let watch = self.watch.clone();
         tracing::info!(target: "treesize::gui", "即将启动扫描线程，代次：{}", generation);
 
         std::thread::Builder::new()
@@ -135,6 +137,8 @@ impl TreeSizeApp {
                     crate::infrastructure::reconcile(&path, st.total_size.bytes(), current_options.apparent_size)
                 });
 
+                let scan_succeeded = result_node.is_some();
+
                 if let Ok(mut s) = state.lock() {
                     if s.generation != generation {
                         tracing::info!(target: "treesize::gui", "跳过过期扫描结果（代次不匹配）");
@@ -146,6 +150,14 @@ impl TreeSizeApp {
                     if let (Some(n), Some(st)) = (result_node, result_stats) {
                         s.node = Some(Arc::new(n));
                         s.stats = Some(st);
+                    }
+                }
+
+                // 扫描成功完成后以当前卷 USN 作为变化感知基线。
+                #[cfg(target_os = "windows")]
+                if scan_succeeded {
+                    if let Some(w) = &watch {
+                        w.set_baseline_from_path(&path_clone);
                     }
                 }
             })
