@@ -256,7 +256,12 @@ pub(crate) fn render_topn(
 
                     // 路径（截断）
                     let path_short = if entry.path.len() > 80 {
-                        format!("…{}", &entry.path[entry.path.len().saturating_sub(77)..])
+                        // 按 UTF-8 字符边界安全截取末尾部分，避免切在多字节字符中间导致 panic
+                        let mut start = entry.path.len() - 77;
+                        while !entry.path.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        format!("…{}", &entry.path[start..])
                     } else {
                         entry.path.clone()
                     };

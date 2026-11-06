@@ -156,6 +156,13 @@
     「未分析（切换到「重复文件」页）」引导，而非整行消失。
   - 新增单元测试 `dashboard_fast_plan_ignores_duplicates` 守护该契约：
     若有人把 duplicates 重新塞回 Dashboard 触发条件，测试立即失败。
+- **GUI「大文件」页崩溃退出（路径截断切在多字节字符中间）**
+  - `render/topn.rs` 用字节索引截断路径：`&entry.path[len-77..]`。
+    路径含中文时 `len-77` 可能落在某个 UTF-8 字符内部
+    （实测 `start byte index 92 is not a char boundary; it is inside '快'`），
+    切片直接 panic，线程 1 崩溃导致程序退出
+  - **改法**：从 `len-77` 起用 `is_char_boundary` 向后对齐到最近的合法字符边界再切片；
+    起点最多推进到 `len`（恒为边界），不会越界。全项目仅此一处存在同类风险
 
 ### 已知问题
 
